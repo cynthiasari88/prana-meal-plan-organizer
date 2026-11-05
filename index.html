@@ -1142,19 +1142,16 @@ const PRESET_PLANS = {
 function buildPresetDays(pkgId, numDays, startWeek){
   const pkg = PRESET_PLANS[pkgId];
   if(!pkg) return null;
-  const availableWeeks = Object.keys(pkg.weeks).filter(w=>pkg.weeks[w]).map(Number).sort((a,b)=>a-b);
+  const availableWeeks = Object.keys(pkg.weeks).filter(w=>Array.isArray(pkg.weeks[w]) && pkg.weeks[w].length).map(Number).sort((a,b)=>a-b);
   if(!availableWeeks.length) return null;
   let order = availableWeeks.slice();
-  const startIdx = order.indexOf(startWeek);
+  const startIdx = order.indexOf(Number(startWeek));
   if(startIdx>0) order = order.slice(startIdx).concat(order.slice(0,startIdx));
-  const days = [];
-  let weekPos = 0;
-  while(days.length < numDays){
-    const wk = order[weekPos % order.length];
-    pkg.weeks[wk].forEach(d=>{ if(days.length<numDays) days.push(d.items.map(it=>({...it}))); });
-    weekPos++;
-  }
-  return days;
+  // Flatten the available official weeks into a single 7/14-day cycle, then repeat
+  // that cycle until the exact client-requested delivery duration has been produced.
+  const cycle = order.flatMap(wk=>(pkg.weeks[wk]||[]).map(d=>(d.items||[]).map(it=>({...it}))));
+  if(!cycle.length) return null;
+  return Array.from({length:numDays},(_,i)=>cycle[i%cycle.length].map(it=>({...it})));
 }
 function buildPresetRotationLabels(pkgId, numDays, startWeek){
   const pkg = PRESET_PLANS[pkgId];
@@ -2389,10 +2386,16 @@ document.getElementById('generateBtn').onclick = ()=>{
   const pkgForPreset = PRANA_PACKAGES.find(p=>p.id===activePackageId);
   if(pkgForPreset && PRESET_PLANS[activePackageId]){
     const presetDays = buildPresetDays(activePackageId, numDays, startWeek);
+    if(!presetDays || !presetDays.length){
+      document.getElementById('mainArea').innerHTML = '<div class="warn">No official menu days are available for this package yet.</div>';
+      return;
+    }
     presetDays.forEach((d,i)=>{ presetDays[i] = d.filter(it=>mealSlots.includes(it.slot)); });
+    // Hard validation: preset output length must match the manually entered delivery duration.
+    presetDays.length = numDays;
     const rotationLabels = buildPresetRotationLabels(activePackageId, numDays, startWeek);
     const packagePrice = packagePriceForDays(activePackageId, numDays);
-    state = {days: presetDays, usage:{}, clientName, targetKcal, deliveryFee, pools:null, includeShake, tP, tF, tC, forcedByDay:[], proteinWeight:3, planType, activePackage: pkgForPreset, packagePrice, isPreset:true, startWeek, startDay:1, rotationLabels, mealSlots};
+    state = {days: presetDays, deliveryDurationDays:numDays, usage:{}, clientName, targetKcal, deliveryFee, pools:null, includeShake, tP, tF, tC, forcedByDay:[], proteinWeight:3, planType, activePackage: pkgForPreset, packagePrice, isPreset:true, startWeek, startDay:1, rotationLabels, mealSlots};
     render();
     if(tP||tF||tC) document.getElementById('mainArea').insertAdjacentHTML('afterbegin', `<div class="warn soft">This is PRANA's official fixed menu, so your P/F/C targets can't change what's served — the badges below only show how far it lands from them. Set the package to <b>Custom</b> to have the system search the menu database for the closest P/F/C match.</div>`);
     return;
@@ -2474,16 +2477,21 @@ document.getElementById('generateBtn').onclick = ()=>{
   // the cycle returns to Week 1 Day 1. Delivery Day remains sequential for billing and reporting.
   for(let i=0;i<numDays;i++){
     if(i>=14){
-      days.push(days[i-14].map(it=>({...it})));
+      // Repeat the matching position from the fixed 14-day cycle. This preserves
+      // exact duration (including 30 days) instead of stopping at the first fortnight.
+      days.push(days[i%14].map(it=>({...it})));
       continue;
     }
     days.push(generateOneDay(pools, includeShake, targetKcal, tP, tF, tC, usage, forcedByDay[i], proteinWeight, 700, mealSlots));
   }
+  // Guardrail: the generated plan must always contain exactly the requested delivery days.
+  while(days.length<numDays && days.length>0) days.push(days[days.length%14].map(it=>({...it})));
+  if(days.length>numDays) days.length=numDays;
 
   const pkg = PRANA_PACKAGES.find(p=>p.id===activePackageId);
   const packagePrice = (pkg && pkg.id!=='custom') ? packagePriceForDays(pkg.id, numDays) : null;
 
-  state = {days, usage, clientName, targetKcal, deliveryFee, pools, includeShake, tP, tF, tC, forcedByDay, proteinWeight, planType, activePackage: pkg && pkg.id!=='custom' ? pkg : null, packagePrice, isPreset:false, mealSlots, startWeek:activePackageId==='custom'?startWeek:1, startDay:activePackageId==='custom'?startDay:1, rotationLabels};
+  state = {days, deliveryDurationDays:numDays, usage, clientName, targetKcal, deliveryFee, pools, includeShake, tP, tF, tC, forcedByDay, proteinWeight, planType, activePackage: pkg && pkg.id!=='custom' ? pkg : null, packagePrice, isPreset:false, mealSlots, startWeek:activePackageId==='custom'?startWeek:1, startDay:activePackageId==='custom'?startDay:1, rotationLabels};
   render();
 };
 
@@ -2625,7 +2633,8 @@ function render(){
     acc.k+=t.k; acc.p+=t.p; acc.f+=t.f; acc.c+=t.c; acc.price+=t.price; acc.cost+=t.cost; acc.est+=t.est;
     return acc;
   }, {k:0,p:0,f:0,c:0,price:0,cost:0,est:0});
-  const n = state.days.length;
+  const n = Math.max(1, Number(state.deliveryDurationDays || state.days.length));
+  const actualDays = state.days.length;
   const deliveryTotal = state.deliveryFee * n;
   const usingPackage = state.activePackage && state.packagePrice!=null;
   const menuTotal = usingPackage ? state.packagePrice : grand.price;
