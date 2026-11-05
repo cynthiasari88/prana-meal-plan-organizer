@@ -293,9 +293,22 @@
       <div class="pricebox" id="packagePriceBox" style="display:none;"></div>
     </div>
     <div class="field" id="startWeekField" style="display:none;">
-      <label>Starting Week</label>
+      <label id="startWeekLabel">Starting Week</label>
       <div class="chiprow" id="startWeekChips"></div>
-      <div class="hint" id="startWeekHint">This package plays back PRANA's actual fixed weekly menu — pick which week the client starts on (e.g. a returning client already mid-rotation).</div>
+      <div class="hint" id="startWeekHint">Choose the starting week of the menu rotation.</div>
+    </div>
+    <div class="field" id="startDayField" style="display:none;">
+      <label>Starting Day of Week</label>
+      <select id="startDaySelect" style="width:100%;padding:9px 10px;border-radius:8px;background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.2);font-size:13px;">
+        <option value="1" style="color:#222">Day 1 — Monday</option>
+        <option value="2" style="color:#222">Day 2 — Tuesday</option>
+        <option value="3" style="color:#222">Day 3 — Wednesday</option>
+        <option value="4" style="color:#222">Day 4 — Thursday</option>
+        <option value="5" style="color:#222">Day 5 — Friday</option>
+        <option value="6" style="color:#222">Day 6 — Saturday</option>
+        <option value="7" style="color:#222">Day 7 — Sunday</option>
+      </select>
+      <div class="hint">For Custom plans, delivery starts from this exact position in the 14-day rotation. After Week 2 Day 7, it returns to Week 1 Day 1.</div>
     </div>
 
     <div class="field">
@@ -389,8 +402,9 @@
     <div class="hint" id="shakeVeganNote" style="display:none;margin-top:-10px;">Heads up: the menu currently has no vegan protein shake, so this will be skipped for a Vegan Meal Plan.</div>
 
     <div class="field">
-      <label>Number of Days</label>
-      <input type="number" id="numDays" value="7" min="1" max="60">
+      <label>Delivery Duration (Days)</label>
+      <input type="number" id="numDays" value="7" min="1" max="60" step="1">
+      <div class="hint">Enter the number of delivery days requested by the client (1–60). This controls the meal-plan length and the total delivery-fee calculation.</div>
     </div>
 
     <div class="field">
@@ -1142,6 +1156,22 @@ function buildPresetDays(pkgId, numDays, startWeek){
   }
   return days;
 }
+function buildPresetRotationLabels(pkgId, numDays, startWeek){
+  const pkg = PRESET_PLANS[pkgId];
+  if(!pkg) return [];
+  const availableWeeks = Object.keys(pkg.weeks).filter(w=>pkg.weeks[w]).map(Number).sort((a,b)=>a-b);
+  if(!availableWeeks.length) return [];
+  let order = availableWeeks.slice();
+  const startIdx = order.indexOf(startWeek);
+  if(startIdx>0) order = order.slice(startIdx).concat(order.slice(0,startIdx));
+  const labels=[];
+  while(labels.length<numDays){
+    order.forEach(wk=>{
+      (pkg.weeks[wk]||[]).forEach((_,dayIndex)=>{if(labels.length<numDays) labels.push({week:wk,day:dayIndex+1});});
+    });
+  }
+  return labels;
+}
 
 const ROLE_SLOT = {B:'Breakfast', SH:'Breakfast', L:'Lunch', SN:'Snack', M:'Dinner', SD:'Dinner', DR:'Dinner'};
 const ROLE_LABEL = {B:'Breakfast', SH:'Shake', L:'Lunch', SN:'Snack', M:'Dinner main', SD:'Side', DR:'Drink'};
@@ -1253,6 +1283,7 @@ updatePlanTypeUI();
 /* ---- PRANA package preset chips ---- */
 let activePackageId = 'custom';
 let startWeek = 1;
+let startDay = 1;
 let applyingPackage = false; // guard so programmatic field changes don't self-deselect the package
 const packageChipsEl = document.getElementById('packageChips');
 const packageChipNodes = {};
@@ -1278,10 +1309,14 @@ function selectPackage(id){
   const pkg = PRANA_PACKAGES.find(p=>p.id===id);
   const box = document.getElementById('packagePriceBox');
   const startWeekField = document.getElementById('startWeekField');
+  const startDayField = document.getElementById('startDayField');
   if(!pkg || pkg.id==='custom'){
     box.style.display = 'none';
-    startWeekField.style.display = 'none';
-    document.getElementById('packageHint').textContent = 'Pick one of PRANA\'s standard packages to auto-fill the calorie target, plan type and official client price below — or leave on "Custom" to build a bespoke plan priced from your menu database.';
+    startWeekField.style.display = 'block';
+    startDayField.style.display = 'block';
+    document.getElementById('startWeekLabel').textContent = 'Custom Rotation — Starting Week';
+    document.getElementById('startWeekHint').textContent = 'Choose where the custom 14-day rotation begins. Week 1 and Week 2 repeat continuously.';
+    document.getElementById('packageHint').textContent = 'Custom plan: the app builds a 14-day menu rotation from your database, then repeats Week 1 and Week 2 as needed for the delivery duration.';
     return;
   }
   applyingPackage = true;
@@ -1292,10 +1327,12 @@ function selectPackage(id){
   const preset = PRESET_PLANS[id];
   const hasTwoWeeks = preset && preset.weeks[1] && preset.weeks[2];
   startWeekField.style.display = (preset) ? 'block' : 'none';
+  startDayField.style.display = 'none';
+  document.getElementById('startWeekLabel').textContent = 'Starting Week';
   if(preset && !hasTwoWeeks){
-    document.getElementById('startWeekHint').textContent = "This package only has one official menu week on file — it will repeat every 7 days.";
+    document.getElementById('startWeekHint').textContent = "Only Week 1 is currently available in the official database for this package, so Week 1 repeats. Week 2 must be added from the approved package menu before it can rotate.";
   } else if(preset){
-    document.getElementById('startWeekHint').textContent = "This package plays back PRANA's actual fixed weekly menu — pick which week the client starts on (e.g. a returning client already mid-rotation).";
+    document.getElementById('startWeekHint').textContent = "Official package menu: choose Week 1 or Week 2 to begin. The app follows the saved PRANA menu sequence.";
   }
   document.getElementById('packageHint').textContent = preset
     ? `${pkg.label} uses PRANA's official fixed weekly menu (not randomly generated). Exclusions and must-include requests below won't apply — switch to Custom for a bespoke plan.`
@@ -1313,10 +1350,12 @@ function updatePackagePriceBox(){
   box.innerHTML = `<b>Official PRANA price:</b> Rp ${Math.round(price).toLocaleString('id-ID')} for ${numDays} day${numDays>1?'s':''}${exact?'':' (interpolated from the 5/7/14/30-day price list)'}<div class="pkg-note">Excludes delivery. Delivery fee below is added on top.</div>`;
 }
 document.getElementById('numDays').addEventListener('input', updatePackagePriceBox);
+document.getElementById('startDaySelect').addEventListener('change', e=>{ startDay = Math.max(1,Math.min(7,parseInt(e.target.value)||1)); });
 // If the nutritionist manually edits calories or plan type after picking a package, the values
 // no longer match an official package — fall back to Custom so we never show a stale/wrong price.
 document.getElementById('targetKcal').addEventListener('input', ()=>{ if(!applyingPackage && activePackageId!=='custom') selectPackage('custom'); });
 document.querySelectorAll('input[name=planType]').forEach(r=>r.addEventListener('change', ()=>{ if(!applyingPackage && activePackageId!=='custom') selectPackage('custom'); }));
+selectPackage('custom');
 
 function updatePfcReadout(){
   const P = parseFloat(document.getElementById('tP').value)||0, F = parseFloat(document.getElementById('tF').value)||0, C = parseFloat(document.getElementById('tC').value)||0;
@@ -2349,8 +2388,9 @@ document.getElementById('generateBtn').onclick = ()=>{
   if(pkgForPreset && PRESET_PLANS[activePackageId]){
     const presetDays = buildPresetDays(activePackageId, numDays, startWeek);
     presetDays.forEach((d,i)=>{ presetDays[i] = d.filter(it=>mealSlots.includes(it.slot)); });
+    const rotationLabels = buildPresetRotationLabels(activePackageId, numDays, startWeek);
     const packagePrice = packagePriceForDays(activePackageId, numDays);
-    state = {days: presetDays, usage:{}, clientName, targetKcal, deliveryFee, pools:null, includeShake, tP, tF, tC, forcedByDay:[], proteinWeight:3, planType, activePackage: pkgForPreset, packagePrice, isPreset:true, startWeek, mealSlots};
+    state = {days: presetDays, usage:{}, clientName, targetKcal, deliveryFee, pools:null, includeShake, tP, tF, tC, forcedByDay:[], proteinWeight:3, planType, activePackage: pkgForPreset, packagePrice, isPreset:true, startWeek, startDay:1, rotationLabels, mealSlots};
     render();
     if(tP||tF||tC) document.getElementById('mainArea').insertAdjacentHTML('afterbegin', `<div class="warn soft">This is PRANA's official fixed menu, so your P/F/C targets can't change what's served — the badges below only show how far it lands from them. Set the package to <b>Custom</b> to have the system search the menu database for the closest P/F/C match.</div>`);
     return;
@@ -2416,6 +2456,11 @@ document.getElementById('generateBtn').onclick = ()=>{
     return;
   }
 
+  const rotationStartOffset = activePackageId==='custom' ? ((startWeek-1)*7 + (startDay-1)) : 0;
+  const rotationLabels = Array.from({length:numDays},(_,i)=>{
+    const pos = (rotationStartOffset + i) % 14;
+    return {week:Math.floor(pos/7)+1, day:(pos%7)+1};
+  });
   const forcedByDay = [];
   for(let d=0; d<numDays; d++){
     forcedByDay.push(requiredItems.filter(r=> r.dayAssignment==='all' || r.dayAssignment===(d%14)).map(r=>r.item));
@@ -2423,21 +2468,20 @@ document.getElementById('generateBtn').onclick = ()=>{
 
   const usage = {};
   const days = [];
-  // Rotation: generate 14 varied days first. Day 15 repeats Day 1, Day 16 repeats Day 2,
-  // and so on (Day 29 = Day 1, Day 30 = Day 2). Variety is optimized across the first 14 days.
+  // Build the custom 14-day rotation from the selected start position. After Week 2 Day 7,
+  // the cycle returns to Week 1 Day 1. Delivery Day remains sequential for billing and reporting.
   for(let i=0;i<numDays;i++){
     if(i>=14){
       days.push(days[i-14].map(it=>({...it})));
       continue;
     }
-    // generateOneDay already applies the per-day rules and records usage, so nothing is removed afterwards.
     days.push(generateOneDay(pools, includeShake, targetKcal, tP, tF, tC, usage, forcedByDay[i], proteinWeight, 700, mealSlots));
   }
 
   const pkg = PRANA_PACKAGES.find(p=>p.id===activePackageId);
   const packagePrice = (pkg && pkg.id!=='custom') ? packagePriceForDays(pkg.id, numDays) : null;
 
-  state = {days, usage, clientName, targetKcal, deliveryFee, pools, includeShake, tP, tF, tC, forcedByDay, proteinWeight, planType, activePackage: pkg && pkg.id!=='custom' ? pkg : null, packagePrice, isPreset:false, mealSlots};
+  state = {days, usage, clientName, targetKcal, deliveryFee, pools, includeShake, tP, tF, tC, forcedByDay, proteinWeight, planType, activePackage: pkg && pkg.id!=='custom' ? pkg : null, packagePrice, isPreset:false, mealSlots, startWeek:activePackageId==='custom'?startWeek:1, startDay:activePackageId==='custom'?startDay:1, rotationLabels};
   render();
 };
 
@@ -2546,10 +2590,12 @@ function render(){
     const badgeHtml = (label, val, target, stat)=> stat ? `<span class="mstat"><i class="mdot ${stat}"></i><span class="mtext ${stat!=='good'?stat:''}">${label} ${num(val)}g / ${target}g (${val>=target?'+':''}${Math.round((val/target-1)*100)}%)</span></span>` : '';
     const macroStatsHtml = statuses.length ? `<div class="macrostat">${badgeHtml('Protein',t.p,state.tP,statP)}${badgeHtml('Fat',t.f,state.tF,statF)}${badgeHtml('Carb',t.c,state.tC,statC)}</div>` : '';
     const dayWarnHtml = statuses.includes('bad') ? `<div class="warn soft" style="margin:0 0 0;">⚠ One or more macros landed well outside the ±${Math.round(PFC_TOL*200)}% range on this day — try "Reshuffle this day", or widen the menu pool (fewer exclusions) if it keeps happening.</div>` : '';
+    const rotation = state.rotationLabels?.[idx];
+    const rotationTag = rotation ? `<span style="font-size:11px;font-weight:400;opacity:.8;margin-left:8px;">Week ${rotation.week} · Day ${rotation.day}</span>` : '';
     return `
     <div class="daycard">
       <div class="daytitle">
-        <span class="name">${DAY_NAMES[idx]||('Day '+(idx+1))}</span>
+        <span class="name">${DAY_NAMES[idx]||('Day '+(idx+1))}${rotationTag}</span>
         <span class="daybtns"><button onclick="openMenuEditor('add',${idx})">＋ Add menu</button>${state.isPreset ? '' : `<button onclick="regenDay(${idx})">🔀 Reshuffle this day</button>`}</span>
       </div>
       <table class="mealtable">
@@ -2590,7 +2636,7 @@ function render(){
     <div class="reportHeader">
       <div>
         <h2 class="display">Meal Plan — ${state.clientName}</h2>
-        <div class="sub">${n} day${n>1?'s':''} &middot; ${PLAN_TYPES.find(t=>t.value===state.planType).label}${state.activePackage?` &middot; PRANA ${state.activePackage.label}`:''}${state.isPreset?` (official menu, starting Week ${state.startWeek})`:''} &middot; target ${num(state.targetKcal,0)} kcal/day ${state.tP?`&middot; P ${state.tP}g / F ${state.tF||'-'}g / C ${state.tC||'-'}g`:''}</div>
+        <div class="sub">${n} day${n>1?'s':''} &middot; ${PLAN_TYPES.find(t=>t.value===state.planType).label}${state.activePackage?` &middot; PRANA ${state.activePackage.label}`:''}${state.isPreset?` (official menu, starting Week ${state.startWeek})`:state.rotationLabels?.length?` (custom rotation starts Week ${state.startWeek}, Day ${state.startDay})`:''} &middot; target ${num(state.targetKcal,0)} kcal/day ${state.tP?`&middot; P ${state.tP}g / F ${state.tF||'-'}g / C ${state.tC||'-'}g`:''}</div>
         ${lastSpecialRequest && lastSpecialRequest.summary ? `<div class="pkg-note" style="margin-top:8px;max-width:520px;"><b>Special request on file:</b> ${escapeHtml(lastSpecialRequest.summary)}</div>` : ''}
       </div>
       <div class="toolbar">
@@ -2754,9 +2800,9 @@ function downloadCsv(){
         owner_id:signedInUser.id,client_id:clientId,title,days_count:state.days.length,plan_type:state.planType||'custom',
         package_id:state.activePackage?.id||null,target_kcal:state.targetKcal||null,
         target_protein_g:state.tP||null,target_fat_g:state.tF||null,target_carbs_g:state.tC||null,
-        delivery_settings:{delivery_fee_per_day:state.deliveryFee||0,meal_slots:state.mealSlots||[],include_shake:!!state.includeShake,start_week:state.startWeek||1},
+        delivery_settings:{delivery_fee_per_day:state.deliveryFee||0,delivery_duration_days:state.days.length,meal_slots:state.mealSlots||[],include_shake:!!state.includeShake,start_week:state.startWeek||1,start_day:state.startDay||1,rotation_labels:state.rotationLabels||[]},
         pricing:{package_price:state.packagePrice??null},
-        plan_data:{client_name:state.clientName,days:state.days,usage:state.usage||{},is_preset:!!state.isPreset,protein_weight:state.proteinWeight||3}
+        plan_data:{client_name:state.clientName,days:state.days,usage:state.usage||{},is_preset:!!state.isPreset,protein_weight:state.proteinWeight||3,rotation_labels:state.rotationLabels||[]}
       }).select('id').single();
       if(planError) throw planError;
       const items=[];
