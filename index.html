@@ -1314,6 +1314,7 @@ function selectPackage(id){
     box.style.display = 'none';
     startWeekField.style.display = 'block';
     startDayField.style.display = 'block';
+    if(startWeekChipsEl.children[1]) startWeekChipsEl.children[1].style.display = '';
     document.getElementById('startWeekLabel').textContent = 'Custom Rotation — Starting Week';
     document.getElementById('startWeekHint').textContent = 'Choose where the custom 14-day rotation begins. Week 1 and Week 2 repeat continuously.';
     document.getElementById('packageHint').textContent = 'Custom plan: the app builds a 14-day menu rotation from your database, then repeats Week 1 and Week 2 as needed for the delivery duration.';
@@ -1328,6 +1329,7 @@ function selectPackage(id){
   const hasTwoWeeks = preset && preset.weeks[1] && preset.weeks[2];
   startWeekField.style.display = (preset) ? 'block' : 'none';
   startDayField.style.display = 'none';
+  if(startWeekChipsEl.children[1]) startWeekChipsEl.children[1].style.display = (!preset || hasTwoWeeks) ? '' : 'none';
   document.getElementById('startWeekLabel').textContent = 'Starting Week';
   if(preset && !hasTwoWeeks){
     document.getElementById('startWeekHint').textContent = "Only Week 1 is currently available in the official database for this package, so Week 1 repeats. Week 2 must be added from the approved package menu before it can rotate.";
