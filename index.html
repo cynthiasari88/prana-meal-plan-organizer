@@ -3075,5 +3075,60 @@ function downloadCsv(){
   window.addEventListener('beforeunload', ()=>{ if(currentUrl) URL.revokeObjectURL(currentUrl); });
 })();
 </script>
+  <script id="delivery-days-addon">
+/* Delivery days: the number typed in "Delivery Duration (Days)" now updates the plan on screen straight away.
+   The menu repeats in a cycle (an uploaded/generated 14-day plan = Week 1, Week 2, then Week 1 again), so the
+   summary, total menu cost and delivery fee (fee x days) always match the number of days the client wants.
+   Edits (Change / Add / remove / Reshuffle) on any day are carried to every repeat of that day. */
+(function(){
+  const numEl = document.getElementById('numDays');
+  if(!numEl || typeof state === 'undefined' || typeof render !== 'function') return;
+  const clone = d => d.map(it=>({...it}));
+  const sig = d => d.map(it=>it.slot+':'+it.name).sort().join('|');
+
+  function ensureCycle(){
+    if(state.isPreset || !state.days.length) return;
+    if(state.cycle && state.cycle.length) return;
+    const days = state.days;
+    let L = Math.min(days.length, 14);
+    if(days.length > 14 && !days.every((d,i)=> i<14 || sig(d)===sig(days[i%14]))) L = days.length; // all-different long plan: repeat the whole thing
+    state.cycle = days.slice(0, L).map(clone);
+  }
+  function rebuild(n){ const L = state.cycle.length; state.days = Array.from({length:n}, (_,i)=>clone(state.cycle[i % L])); }
+  // If one day was edited, make it the truth for its position in the cycle, then refresh all repeats.
+  function syncFromDays(){
+    if(state.isPreset || !state.days.length) return;
+    ensureCycle();
+    const L = state.cycle.length;
+    for(let i=0;i<state.days.length;i++){
+      if(sig(state.days[i]) !== sig(state.cycle[i % L])){ state.cycle[i % L] = clone(state.days[i]); break; }
+    }
+    rebuild(state.days.length);
+  }
+  function applyDays(raw){
+    const v = parseInt(raw); if(!v || v < 1) return;
+    const n = Math.max(1, Math.min(60, v));
+    if(!state.days.length || state.days.length === n) return;
+    if(state.isPreset){ document.getElementById('generateBtn').click(); return; } // official packages: rebuilt with the right Week 1/2 rotation and price tier
+    syncFromDays(); rebuild(n); render();
+  }
+  const _render = render;
+  render = function(){ try{ syncFromDays(); }catch(e){ console.error('delivery-days sync:', e); } return _render.apply(this, arguments); };
+  numEl.addEventListener('input', ()=>applyDays(numEl.value));
+  numEl.addEventListener('change', ()=>applyDays(numEl.value));
+
+  // quick picks next to the manual field
+  if(!document.getElementById('deliveryDaysChips')){
+    const row = document.createElement('div'); row.className = 'chiprow'; row.id = 'deliveryDaysChips'; row.style.marginTop = '8px';
+    [7,14,21,30,60].forEach(n=>{
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.textContent = n + ' days';
+      b.onclick = ()=>{ numEl.value = n; numEl.dispatchEvent(new Event('input', {bubbles:true})); };
+      row.appendChild(b);
+    });
+    numEl.insertAdjacentElement('afterend', row);
+  }
+  window.__deliveryDays = {ensureCycle, rebuild, syncFromDays, applyDays};
+})();
+</script>
 </body>
 </html>
