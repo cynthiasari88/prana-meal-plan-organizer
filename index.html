@@ -3130,5 +3130,58 @@ function downloadCsv(){
   window.__deliveryDays = {ensureCycle, rebuild, syncFromDays, applyDays};
 })();
 </script>
+  <script id="pdf-reader-fix-addon">
+/* Fixes for reading a saved meal-plan PDF (Print / Save PDF) and for printing:
+   1) "Day 1 Week 1 · Day 1" headings, the browser's date header and "F -g / C -g" targets are cleaned up
+      before the PDF text is read, so the plan loads.
+   2) A stray piece of code that was printed at the end of every PDF report is removed. */
+(function(){
+  const cleanText = s => String(s)
+    .replace(/\s*Week\s*\d+\s*·\s*Day\s*\d+\s*$/i, '')                              // "Day 1 | Week 1 · Day 1" -> "Day 1"
+    .replace(/\s*\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}[.:]\d{2}\s*$/, '')            // browser header date + time
+    .replace(/\b([FC])\s*-\s*g\b/g, '$1 0g');                                       // "F -g" (target not set) -> "F 0g"
+  function patchPdf(pdf){
+    const getPage = pdf.getPage.bind(pdf);
+    pdf.getPage = async n => {
+      const page = await getPage(n), getText = page.getTextContent.bind(page);
+      page.getTextContent = async (...a) => {
+        const tc = await getText(...a);
+        let items = tc.items.map(it => (typeof it.str === 'string' ? {...it, str: cleanText(it.str)} : it));
+        // the "Week 1 · Day 1" label next to each day heading comes as separate pieces ("Week 1", "Day 1"): drop them
+        const drop = new Set();
+        items.forEach((w, i) => {
+          if(typeof w.str !== 'string' || !/^\s*Week\s*\d+\s*$/i.test(w.str)) return;
+          drop.add(i);
+          items.forEach((d, j) => {
+            if(typeof d.str === 'string' && /^\s*Day\s*\d+\s*$/i.test(d.str) && Math.abs(d.transform[5] - w.transform[5]) <= 2.5 && d.transform[4] > w.transform[4] && d.transform[4] - w.transform[4] < 120) drop.add(j);
+          });
+        });
+        tc.items = items.filter((it, i) => !drop.has(i) && (typeof it.str !== 'string' || (it.str.trim() !== '·' && (it.str.trim() !== '' || it.hasEOL))));
+        return tc;
+      };
+      return page;
+    };
+    return pdf;
+  }
+  function wrap(lib){
+    if(!lib || lib.__fixed || typeof lib.getDocument !== 'function') return lib;
+    const orig = lib.getDocument.bind(lib);
+    const getDocument = (...a) => { const task = orig(...a); return { promise: task.promise.then(patchPdf), destroy: () => task.destroy() }; };
+    // pdf.js exports are read-only, so hand the page a thin stand-in that only swaps getDocument
+    return new Proxy(lib, { get: (t, k) => k === 'getDocument' ? getDocument : (k === '__fixed' ? true : Reflect.get(t, k)) });
+  }
+  // pdf.js is loaded on demand, so wrap it the moment it appears
+  let _lib = window.pdfjsLib ? wrap(window.pdfjsLib) : undefined;
+  Object.defineProperty(window, 'pdfjsLib', { configurable: true, get(){ return _lib; }, set(v){ _lib = wrap(v); } });
+
+  // remove the stray code block from the printed report
+  if(typeof printMealPlan === 'function'){
+    try{
+      const src = printMealPlan.toString().replace(/\(function\(\)\{\s*const discountInput[\s\S]*?\}\)\(\);/, '');
+      if(src !== printMealPlan.toString()) printMealPlan = (0, eval)('(' + src + ')');
+    }catch(e){ console.error('print fix skipped:', e); }
+  }
+})();
+</script>
 </body>
 </html>
