@@ -1794,7 +1794,10 @@ function msFindDishes(toks){
 }
 // One part of a meal, e.g. "1 fruit plater", "1 meal high protein", "Any", "protein shakes", "vegetables".
 function msClassify(raw){
-  let s = String(raw||'').toLowerCase().replace(/[()\[\]"']/g,' ').replace(/\s+/g,' ').trim().replace(/[.!]+$/,'');
+  // "(can give double meals)" is a comment for the nutritionist, not a food; "sometimes", "such as" etc. carry no food either
+  let s = String(raw||'').toLowerCase().replace(/\([^)]*\)|\[[^\]]*\]/g,' ').replace(/["']/g,' ')
+    .replace(/\b(?:sometimes|occasionally|maybe|optionally|preferably|ideally|usually|often|kadang(?:-kadang)?|such\s+as|like|e\.?g\.?|etc\.?)\b/g,' ')
+    .replace(/\s+/g,' ').trim().replace(/[.!]+$/,'');
   let count = null, range = null, m;
   if((m = s.match(/^(\d{1,2})\s*(?:-|–|to|or|atau|sampai)\s*(\d{1,2})\s*(?:x|×)?\s*(?=[a-z])/))){ const a=+m[1], b=+m[2]; range = {min:Math.max(0,Math.min(a,b)), max:Math.min(6,Math.max(a,b))}; s = s.slice(m[0].length); }
   else if((m = s.match(/^(\d{1,2})\s*(?:x|×)?\s*(?=[a-z])/))){ count = +m[1]; s = s.slice(m[0].length); }
@@ -1802,11 +1805,13 @@ function msClassify(raw){
   if((m = s.match(/\s*(?:x|×)\s*(\d{1,2})$/))){ count = +m[1]; s = s.slice(0, m.index); }
   if(count!==null) count = Math.max(1, Math.min(6, count));
   s = s.trim();
-  // a choice between kinds of food: "egg/salmon/porridge meals", "chicken or fish"
+  // a choice between kinds of food: "egg/salmon/porridge meals", "meals porridge/eggs/waffle", "chicken or fish"
   const alts = s.split(/\s*\/\s*|\s+or\s+|\s+atau\s+/).map(x=>x.trim()).filter(Boolean);
   if(alts.length > 1){
     let mealOnly = false; const last = alts.length-1, tm = alts[last].match(/\s+(?:meals?|dish(?:es)?|menus?|options?|makanan)$/);
     if(tm){ alts[last] = alts[last].slice(0, tm.index); mealOnly = true; }
+    const lm = alts[0].match(/^(?:meals?|dish(?:es)?|menus?|options?|makanan)\s*(?::|of|with|from)?\s+/);
+    if(lm){ alts[0] = alts[0].slice(lm[0].length); mealOnly = true; }
     const subs = alts.map(a=>msClassify(a)).filter(x=>x.kind!=='unknown' && x.kind!=='any' && x.kind!=='alt');
     if(subs.length){
       const q = range || (count!==null ? {min:count, max:count} : {min:1, max:1});
@@ -1886,7 +1891,7 @@ function msPartLabel(p){
   if(p.kind==='any') return 'Any (1–2 dishes, plus sides/drink if needed for the targets)';
   if(p.kind==='dish') return `${q} × ${p.item.name}`;
   if(p.kind==='meal') return `${q} ${p.hp?'high-protein ':''}meal${p.max>1?'s':''}`;
-  if(p.kind==='alt') return `${q} ${p.label} ${p.mealOnly?'meal':'(any of these)'}`;
+  if(p.kind==='alt') return p.mealOnly ? `${q} meal${p.max>1?'s':''}: ${p.label}` : `${q} ${p.label} (any of these)`;
   if(p.kind==='match') return `${q} ${p.hp?'high-protein ':''}dish matching "${p.label}" (${p.items.length} options)`;
   return `${q} ${p.hp?'high-protein ':''}${MS_CATS[p.cat].label}${MS_CATS[p.cat].side?' portion'+(p.max>1?'s':''):''}`;
 }
@@ -1971,8 +1976,8 @@ function freshOnly(pool, counts){
   const min = Math.min(...pool.map(c));
   return pool.filter(d=>c(d)===min);
 }
-function dayContext(structure, rules, days, i){
-  return {structure, rules, avoid: (rules && rules.noRepeatWeek) ? weekCounts(days, i) : null};
+function dayContext(structure, rules, days, i, topUp=true){
+  return {structure, rules, topUp, avoid: (rules && rules.noRepeatWeek) ? weekCounts(days, i) : null};
 }
 // Dishes that still appear twice in one week (only when the menu has too few options), for the note on the plan.
 function weeklyRepeatNote(days, rules){
@@ -1992,6 +1997,107 @@ function planRulesHtml(rules){
     + (b.except.length || b.exceptWords.length ? ` (except ${b.except.concat(b.exceptWords).join(', ')})` : ''));
   if(rules.noRepeatWeek) bans.push('No dish repeated within a week (Day 1–7, Day 8–14, …)');
   return `<div class="pkg-note" style="margin-top:6px;"><b>Rules:</b> ${bans.map(escapeHtml).join(' · ')}</div>`;
+}
+
+// ---- Whole-week balancing (used with "no same food in a week") ----
+// Days are built one after another, so with the no-repeat rule the first days take the best dishes and the last days
+// of a week are left short of calories or protein. After a week is built, this moves dishes BETWEEN days of the same
+// week (same part of the same meal), swaps in dishes not used that week yet, and adds/removes within the ranges the
+// request allows, keeping every move that brings the week as a whole closer to target. Every rule stays true:
+// each day keeps its structure, no dish appears twice in the week, and per-meal bans are kept (dishes only move within a meal).
+function balanceWeek(days, from, to, o){
+  const {structure, rules, pools, targetKcal, tP, tF, tC, pw} = o;
+  const idx = []; for(let d=from; d<to && d<days.length; d++) idx.push(d);
+  if(idx.length < 2) return;
+  const specs = structure ? structure.specs : null;
+  const MEAL_ROLES = ['B','L','M','SN'];
+  const clash = (items, c, slot, skip)=> !!specs && MEAL_ROLES.includes(c.role) && c.cat!=='meat'
+    && items.some((y,j)=>j!==skip && y.slot===slot && MEAL_ROLES.includes(y.role) && y.cat===c.cat);
+  const poolOf = it=> specs ? ((specs[it._spec]||{}).pool || [])
+                            : ((pools[POOL_KEY_BY_ROLE[it.role]]||[]).filter(c=>!slotBanned(c, it.slot, rules)));
+  const sameKind = (x,y)=> specs ? (x._spec===y._spec && x._spec>=0) : (x.role===y.role && x.slot===y.slot);
+  const score = items=> scoreDay(items, targetKcal, tP, tF, tC, {}, pw);
+  const sc = {}; idx.forEach(d=>{ sc[d] = score(days[d]); });
+  const weekUse = ()=>{ const c = {}; idx.forEach(d=>days[d].forEach(it=>{ if(!it.required) c[dishKey(it)] = (c[dishKey(it)]||0)+1; })); return c; };
+  const has = (items, c, skip)=> items.some((y,j)=>j!==skip && dishKey(y)===dishKey(c));
+  for(let iter=0; iter<250; iter++){
+    const used = weekUse();
+    let best = null, gain = 0.5;
+    const tryMove = (g, mv)=>{ if(g > gain){ gain = g; best = mv; } };
+    // 1) exchange a dish between two days (same meal part)
+    for(let a=0; a<idx.length; a++) for(let b=a+1; b<idx.length; b++){
+      const A = days[idx[a]], B = days[idx[b]];
+      A.forEach((x,i)=>{ if(x.required) return;
+        B.forEach((y,j)=>{
+          if(y.required || !sameKind(x,y) || dishKey(x)===dishKey(y)) return;
+          if(has(A, y, i) || has(B, x, j) || clash(A, y, x.slot, i) || clash(B, x, y.slot, j)) return;
+          const A2 = A.slice(); A2[i] = {...y, slot:x.slot, _spec:x._spec};
+          const B2 = B.slice(); B2[j] = {...x, slot:y.slot, _spec:y._spec};
+          const sa = score(A2), sb = score(B2);
+          tryMove(sc[idx[a]] + sc[idx[b]] - sa - sb, {set:[[idx[a],A2,sa],[idx[b],B2,sb]]});
+        });
+      });
+    }
+    // 2) swap a dish for one not used anywhere this week
+    idx.forEach(d=>{ const D = days[d];
+      D.forEach((x,i)=>{ if(x.required) return;
+        poolOf(x).forEach(c=>{
+          if(used[dishKey(c)] || has(D, c, i) || clash(D, c, x.slot, i)) return;
+          const D2 = D.slice(); D2[i] = {...c, slot:x.slot, _spec:x._spec};
+          const s2 = score(D2); tryMove(sc[d] - s2, {set:[[d,D2,s2]]});
+        });
+      });
+    });
+    // 3) add one more / remove one, only where the request gives a range (e.g. "1 or 2 meals")
+    if(specs) idx.forEach(d=>{ const D = days[d], per = {};
+      D.forEach(x=>{ per[x._spec] = (per[x._spec]||0)+1; });
+      specs.forEach((s,si)=>{
+        if(s.fixed || (per[si]||0) >= s.max) return;
+        s.pool.forEach(c=>{
+          if(used[dishKey(c)] || has(D, c, -1) || clash(D, c, s.slot, -1)) return;
+          const D2 = D.concat([{...c, slot:s.slot, _spec:si}]); const s2 = score(D2); tryMove(sc[d] - s2, {set:[[d,D2,s2]]});
+        });
+      });
+      D.forEach((x,i)=>{
+        if(x.required || x._spec<0 || (per[x._spec]||0) <= specs[x._spec].min) return;
+        const D2 = D.filter((_,j)=>j!==i); const s2 = score(D2); tryMove(sc[d] - s2, {set:[[d,D2,s2]]});
+      });
+    });
+    if(!best) break;
+    best.set.forEach(([d, D, s])=>{ days[d] = D; sc[d] = s; });
+  }
+  idx.forEach(d=>days[d].sort((a,b)=>MS_SLOT_ORDER.indexOf(a.slot)-MS_SLOT_ORDER.indexOf(b.slot)));
+}
+
+// ---- Top-up portions (meal structures only) ----
+// A strict meal structure can make a day impossible to bring up to the client's minimums (e.g. 180 g protein with one
+// lunch dish and one dinner dish and no repeats in a week). Then up to 2 small portions (protein / egg / carb / yogurt
+// sides) are added to lunch or dinner, only if each one brings the day closer to target. They respect exclusions,
+// per-meal bans and the no-repeat rule where possible, and are marked "Added for target" on the plan.
+function topUpDay(day, R, o, avoid){
+  if(!R || !R.boosters || !R.boosters.length) return day;
+  const {rules, targetKcal, tP, tF, tC, pw} = o;
+  const half = (PFC_TOL||0.05)/2;
+  const short = t=> t.k < targetKcal*(1-half) || (tP && t.p < tP*(1-half)) || (tF && t.f < tF*(1-half)) || (tC && t.c < tC*(1-half));
+  const slots = ['Dinner','Lunch','Breakfast','Snack'].filter(s=>R.slots.includes(s));
+  for(let n=0; n<2; n++){
+    if(!short(totalsOf(day))) break;
+    const cur = scoreDay(day, targetKcal, tP, tF, tC, {}, pw);
+    const have = countDishes(day);
+    let best = null, bestS = cur - 1;
+    freshOnly(R.boosters, avoid).forEach(c=>{
+      if((have[dishKey(c)]||0) >= maxCopies(c)) return;
+      const slot = slots.find(s=>!slotBanned(c, s, rules)); if(!slot) return;
+      const d2 = day.concat([{...c, slot, topUp:true, _spec:-2}]);
+      const s2 = scoreDay(d2, targetKcal, tP, tF, tC, {}, pw);
+      if(s2 < bestS){ bestS = s2; best = d2; }
+    });
+    if(!best) break;
+    day = best;
+    if(avoid){ const a = day[day.length-1]; avoid[a.name] = (avoid[a.name]||0)+1; }
+  }
+  day.sort((a,b)=>MS_SLOT_ORDER.indexOf(a.slot)-MS_SLOT_ORDER.indexOf(b.slot));
+  return day;
 }
 
 // Meal dishes that suit the meal they are served at: breakfast dishes at breakfast, and no pancakes/waffles/muffins at
@@ -2032,7 +2138,8 @@ function resolveMealStructure(ms, P, B, rules){
       specs.push({slot, label, pool:allowed(partPool(p, slot), slot), min:p.min, max:p.max});
     }
   }));
-  return {slots: ms.slots.slice(), specs};
+  const boosters = (B.side||[]).filter(d=>['protein','other','side','yogurt'].includes(d.cat) && !MS_VEG_RX.test(d.name) && d.kcal>=30 && !/sauce|dressing|oil|seeds|bread/i.test(d.name));
+  return {slots: ms.slots.slice(), specs, boosters};
 }
 // Builds one day that follows the structure. Local search over: swap a dish for another of the same kind,
 // add one more (only where the structure allows a range, e.g. "Any" or "vegetables"), or remove one,
@@ -2109,7 +2216,8 @@ function generateStructuredDay(R, targetKcal, tP, tF, tC, usage, forcedItems, pw
     const bt = tot(best);
     if(hasPFC ? (ok(bt.k,targetKcal) && ok(bt.p,tP) && ok(bt.f,tF) && ok(bt.c,tC)) : Math.abs(bt.k/targetKcal-1) <= 0.01) break;
   }
-  const out = best.map(({_spec, ...it})=>it);
+  let out = best.map(it=>({...it}));
+  if(ctx && ctx.topUp) out = topUpDay(out, R, {rules:ctx.rules, targetKcal, tP, tF, tC, pw}, avoid ? {...avoid} : null);
   out.sort((a,b)=>MS_SLOT_ORDER.indexOf(a.slot)-MS_SLOT_ORDER.indexOf(b.slot));
   out.forEach(it=>{ usage[it.name] = (usage[it.name]||0)+1; });
   return out;
@@ -2766,7 +2874,7 @@ function aggregateItems(items){
       const e = map.get(it.name);
       e.qty += 1;
       e.kcal += it.kcal; e.p += it.p; e.f += it.f; e.c += it.c; e.price += it.price;
-      e.required = e.required || it.required;
+      e.required = e.required || it.required; e.topUp = e.topUp || it.topUp;
     } else {
       map.set(it.name, {...it, qty:1});
     }
@@ -2916,7 +3024,13 @@ document.getElementById('generateBtn').onclick = ()=>{
       days.push(days[i%14].map(it=>({...it})));
       continue;
     }
-    days.push(generateOneDay(pools, includeShake, targetKcal, tP, tF, tC, usage, forcedByDay[i], proteinWeight, 700, mealSlots, dayContext(structure, rules, days, i)));
+    days.push(generateOneDay(pools, includeShake, targetKcal, tP, tF, tC, usage, forcedByDay[i], proteinWeight, 700, mealSlots, dayContext(structure, rules, days, i, !(rules && rules.noRepeatWeek))));
+  }
+  // With "no same food in a week", plan each week as a whole so its last days are not left short.
+  if(rules && rules.noRepeatWeek){
+    for(let w=0; w<Math.min(numDays,14); w+=7) balanceWeek(days, w, Math.min(w+7, numDays, 14), {structure, rules, pools, targetKcal, tP, tF, tC, pw:proteinWeight});
+    if(structure) for(let i=0; i<Math.min(numDays,14); i++) days[i] = topUpDay(days[i], structure, {rules, targetKcal, tP, tF, tC, pw:proteinWeight}, weekCounts(days, i));
+    for(let i=14; i<days.length; i++) days[i] = days[i%14].map(it=>({...it})); // repeats follow the balanced fortnight
   }
   // Guardrail: the generated plan must always contain exactly the requested delivery days.
   while(days.length<numDays && days.length>0) days.push(days[days.length%14].map(it=>({...it})));
@@ -3025,7 +3139,7 @@ function render(){
       rows += `<tr class="section"><td colspan="${sp?6:5}">${slot}</td></tr>`;
       aggregateItems(slotItems).forEach(it=>{
         const qtyLabel = it.qty>1 ? ` ×${it.qty}` : '';
-        rows += `<tr class="${it.required?'reqd':''}"><td>${it.name}${qtyLabel}${it.required?'<span class="reqbadge">Requested</span>':''}${editBtns(idx, slot, it.name)}</td><td class="num">${num(it.kcal,0)}</td><td class="num">${num(it.p)}</td><td class="num">${num(it.f)}</td><td class="num">${num(it.c)}</td>${sp?`<td class="num">${idr(it.price)}</td>`:''}</tr>`;
+        rows += `<tr class="${it.required?'reqd':''}"><td>${it.name}${qtyLabel}${it.required?'<span class="reqbadge">Requested</span>':''}${it.topUp?'<span class="reqbadge" style="background:#E3EEE5;color:#3F6B4A;" title="Added because the meal structure alone could not reach the calorie / P-F-C target">Added for target</span>':''}${editBtns(idx, slot, it.name)}</td><td class="num">${num(it.kcal,0)}</td><td class="num">${num(it.p)}</td><td class="num">${num(it.f)}</td><td class="num">${num(it.c)}</td>${sp?`<td class="num">${idr(it.price)}</td>`:''}</tr>`;
       });
     });
     const pPct = t.p*4, fPct = t.f*9, cPct = t.c*4, totCal=pPct+fPct+cPct || 1;
