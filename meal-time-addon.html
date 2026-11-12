@@ -1,0 +1,39 @@
+<script id="meal-time-addon">
+/* Must-include dishes: choose WHICH MEAL each dish is served at.
+   Every dish card gets a "Serve at" menu (Usual meal / Breakfast / Lunch / Snack / Dinner). The dish is then placed
+   in that meal on every day it is required, and the plan builds the rest of that day around it. */
+(function(){
+  if(typeof requiredItems === 'undefined' || typeof renderRequiredList !== 'function') return;
+  const SLOTS = ['Breakfast','Lunch','Snack','Dinner'];
+  const list = document.getElementById('reqList');
+  function enhance(){
+    document.querySelectorAll('#reqList .reqcard').forEach((card, i)=>{
+      const r = requiredItems[i]; if(!r || card.querySelector('.req-meal')) return;
+      const nat = (typeof ROLE_SLOT !== 'undefined') ? ROLE_SLOT[r.item.role] : '';
+      const wrap = document.createElement('div'); wrap.className = 'req-meal'; wrap.style.cssText = 'margin:8px 0 2px;';
+      const lab = document.createElement('div'); lab.textContent = 'Serve at';
+      lab.style.cssText = 'font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:#B9C9BB;margin-bottom:3px;';
+      const sel = document.createElement('select');
+      sel.innerHTML = '<option value="">Usual meal' + (nat ? ' (' + nat + ')' : '') + '</option>'
+        + SLOTS.map(s=>'<option value="' + s + '"' + (r.item.slotPref === s ? ' selected' : '') + '>' + s + '</option>').join('');
+      sel.onchange = ()=>{ requiredItems[i].item = {...requiredItems[i].item, slotPref: sel.value || null}; };
+      wrap.append(lab, sel);
+      const daySel = Array.from(card.children).find(c=>c.tagName === 'SELECT');
+      card.insertBefore(wrap, daySel || null);
+    });
+  }
+  // the list is rebuilt whenever a dish is added/removed or the number of days changes: add the menus again each time
+  new MutationObserver(enhance).observe(list, {childList:true});
+  enhance();
+
+  // a dish served at another meal counts as THAT meal's food (so a Snack dish moved to Breakfast does not leave the day without a snack)
+  if(typeof computeNeeds === 'function'){
+    const _computeNeeds = computeNeeds, ROLE_OF = {Breakfast:'B', Lunch:'L', Snack:'SN', Dinner:'M'};
+    computeNeeds = function(forced, ...rest){
+      const mapped = (forced || []).map(f=>(f.slotPref && ROLE_OF[f.slotPref] && !['SD','DR','SH'].includes(f.role)) ? {...f, role: ROLE_OF[f.slotPref]} : f);
+      return _computeNeeds(mapped, ...rest);
+    };
+  }
+  window.__mealTime = {enhance};
+})();
+</script>
