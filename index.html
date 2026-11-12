@@ -2705,27 +2705,6 @@ function printMealPlan(){
     .summary{break-inside:avoid;page-break-inside:avoid}
     a{color:inherit;text-decoration:none}
   </style></head><body><div class="main">${report}</div><script>window.addEventListener('load',function(){setTimeout(function(){try{window.focus();window.print()}catch(e){document.body.insertAdjacentHTML('afterbegin','<p>Use your browser menu and choose Print, then Save as PDF.</p>')}},350)});<\/script>
-
-
-(function(){
-  const discountInput = document.getElementById('discountPct');
-  if(!discountInput) return;
-  discountInput.addEventListener('input', function(){
-    const max = Number(discountInput.max || 0);
-    let value = discountInput.value === '' ? '' : Number(discountInput.value);
-    if(value !== '' && Number.isFinite(value)){
-      if(value < 0) value = 0;
-      if(value > max) value = max;
-      discountInput.value = String(value);
-    }
-  });
-  discountInput.addEventListener('change', function(){
-    const max = Number(discountInput.max || 0);
-    const value = discountInput.value === '' ? 0 : Number(discountInput.value);
-    discountInput.value = String(Math.min(max, Math.max(0, Number.isFinite(value) ? value : 0)));
-  });
-})();
-
 </body></html>`);
   printWindow.document.close();
 }
@@ -3105,36 +3084,67 @@ function downloadCsv(){
     }
     rebuild(state.days.length);
   }
+  // Must-include dishes for rotation position k (same rule as the generator: 'Every day' or that day of the 14-day cycle).
+  function forcedFor(k){
+    return (typeof requiredItems !== 'undefined' ? requiredItems : [])
+      .filter(r=> r.dayAssignment==='all' || r.dayAssignment===k).map(r=>r.item);
+  }
+  // A generated plan shorter than 14 days only has part of the Week 1/Week 2 rotation. When more days are asked for,
+  // build the missing rotation days for real instead of copying Week 1 into Week 2.
+  function extendCycle(n){
+    if(!state.pools || !state.rotationLabels || typeof generateOneDay !== 'function') return; // uploaded plans just repeat as printed
+    const target = Math.min(n, 14);
+    for(let k = state.cycle.length; k < target; k++){
+      state.cycle.push(generateOneDay(state.pools, state.includeShake, state.targetKcal, state.tP, state.tF, state.tC, state.usage || (state.usage = {}),
+        forcedFor(k), state.proteinWeight || 3, 700, state.mealSlots || ['Breakfast','Lunch','Dinner']));
+    }
+  }
+  // Everything that depends on the number of days must follow the new length too, otherwise the summary,
+  // averages, delivery fee (fee x days) and Week/Day labels keep using the length the plan was first generated with.
+  function updateMeta(n){
+    state.deliveryDurationDays = n;
+    if(state.rotationLabels){
+      const off = ((state.startWeek||1)-1)*7 + ((state.startDay||1)-1);
+      state.rotationLabels = Array.from({length:n}, (_,i)=>{ const pos = (off+i) % 14; return {week:Math.floor(pos/7)+1, day:pos%7+1}; });
+    }
+    const oldForced = state.forcedByDay || [];
+    state.forcedByDay = Array.from({length:n}, (_,i)=> oldForced[i%14] || forcedFor(i%14)); // keeps "Reshuffle this day" honoring must-include dishes
+    if(state.activePackage && state.packagePrice != null && typeof packagePriceForDays === 'function'){
+      state.packagePrice = packagePriceForDays(state.activePackage.id, n);
+    }
+  }
   function applyDays(raw){
     const v = parseInt(raw); if(!v || v < 1) return;
     const n = Math.max(1, Math.min(60, v));
     if(!state.days.length || state.days.length === n) return;
     if(state.isPreset){ document.getElementById('generateBtn').click(); return; } // official packages: rebuilt with the right Week 1/2 rotation and price tier
-    syncFromDays(); rebuild(n); render();
+    syncFromDays(); extendCycle(n); rebuild(n); updateMeta(n); render();
   }
   const _render = render;
   render = function(){ try{ syncFromDays(); }catch(e){ console.error('delivery-days sync:', e); } return _render.apply(this, arguments); };
-  numEl.addEventListener('input', ()=>applyDays(numEl.value));
-  numEl.addEventListener('change', ()=>applyDays(numEl.value));
+  // Wait until typing pauses (typing "30" would otherwise rebuild a 3-day plan first); apply at once when the field is left.
+  let typingTimer = null;
+  numEl.addEventListener('input', ()=>{ clearTimeout(typingTimer); typingTimer = setTimeout(()=>applyDays(numEl.value), 500); });
+  numEl.addEventListener('change', ()=>{ clearTimeout(typingTimer); applyDays(numEl.value); });
 
   // quick picks next to the manual field
   if(!document.getElementById('deliveryDaysChips')){
     const row = document.createElement('div'); row.className = 'chiprow'; row.id = 'deliveryDaysChips'; row.style.marginTop = '8px';
     [7,14,21,30,60].forEach(n=>{
       const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.textContent = n + ' days';
-      b.onclick = ()=>{ numEl.value = n; numEl.dispatchEvent(new Event('input', {bubbles:true})); };
+      b.onclick = ()=>{ numEl.value = n; numEl.dispatchEvent(new Event('input', {bubbles:true})); numEl.dispatchEvent(new Event('change', {bubbles:true})); };
       row.appendChild(b);
     });
     numEl.insertAdjacentElement('afterend', row);
   }
-  window.__deliveryDays = {ensureCycle, rebuild, syncFromDays, applyDays};
+  window.__deliveryDays = {ensureCycle, rebuild, syncFromDays, applyDays, extendCycle, updateMeta};
 })();
 </script>
   <script id="pdf-reader-fix-addon">
 /* Fixes for reading a saved meal-plan PDF (Print / Save PDF) and for printing:
    1) "Day 1 Week 1 · Day 1" headings, the browser's date header and "F -g / C -g" targets are cleaned up
       before the PDF text is read, so the plan loads.
-   2) A stray piece of code that was printed at the end of every PDF report is removed. */
+   (The stray code that used to print at the end of every PDF report is now removed from printMealPlan itself.) */
 (function(){
   const cleanText = s => String(s)
     .replace(/\s*Week\s*\d+\s*·\s*Day\s*\d+\s*$/i, '')                              // "Day 1 | Week 1 · Day 1" -> "Day 1"
@@ -3174,65 +3184,9 @@ function downloadCsv(){
   let _lib = window.pdfjsLib ? wrap(window.pdfjsLib) : undefined;
   Object.defineProperty(window, 'pdfjsLib', { configurable: true, get(){ return _lib; }, set(v){ _lib = wrap(v); } });
 
-  // remove the stray code block from the printed report
-  if(typeof printMealPlan === 'function'){
-    try{
-      const src = printMealPlan.toString().replace(/\(function\(\)\{\s*const discountInput[\s\S]*?\}\)\(\);/, '');
-      if(src !== printMealPlan.toString()) printMealPlan = (0, eval)('(' + src + ')');
-    }catch(e){ console.error('print fix skipped:', e); }
-  }
 })();
 </script>
-  <script id="pdf-reader-fix-addon">
-/* Fixes for reading a saved meal-plan PDF (Print / Save PDF) and for printing:
-   1) "Day 1 Week 1 · Day 1" headings, the browser's date header and "F -g / C -g" targets are cleaned up
-      before the PDF text is read, so the plan loads.
-   2) A stray piece of code that was printed at the end of every PDF report is removed. */
-(function(){
-  const cleanText = s => String(s)
-    .replace(/\s*Week\s*\d+\s*·\s*Day\s*\d+\s*$/i, '')
-    .replace(/\s*\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}[.:]\d{2}\s*$/, '')
-    .replace(/\b([FC])\s*-\s*g\b/g, '$1 0g');
-  function patchPdf(pdf){
-    const getPage = pdf.getPage.bind(pdf);
-    pdf.getPage = async n => {
-      const page = await getPage(n), getText = page.getTextContent.bind(page);
-      page.getTextContent = async (...a) => {
-        const tc = await getText(...a);
-        let items = tc.items.map(it => (typeof it.str === 'string' ? {...it, str: cleanText(it.str)} : it));
-        const drop = new Set();
-        items.forEach((w, i) => {
-          if(typeof w.str !== 'string' || !/^\s*Week\s*\d+\s*$/i.test(w.str)) return;
-          drop.add(i);
-          items.forEach((d, j) => {
-            if(typeof d.str === 'string' && /^\s*Day\s*\d+\s*$/i.test(d.str) && Math.abs(d.transform[5] - w.transform[5]) <= 2.5 && d.transform[4] > w.transform[4] && d.transform[4] - w.transform[4] < 120) drop.add(j);
-          });
-        });
-        tc.items = items.filter((it, i) => !drop.has(i) && (typeof it.str !== 'string' || (it.str.trim() !== '·' && (it.str.trim() !== '' || it.hasEOL))));
-        return tc;
-      };
-      return page;
-    };
-    return pdf;
-  }
-  function wrap(lib){
-    if(!lib || lib.__fixed || typeof lib.getDocument !== 'function') return lib;
-    const orig = lib.getDocument.bind(lib);
-    const getDocument = (...a) => { const task = orig(...a); return { promise: task.promise.then(patchPdf), destroy: () => task.destroy() }; };
-    return new Proxy(lib, { get: (t, k) => k === 'getDocument' ? getDocument : (k === '__fixed' ? true : Reflect.get(t, k)) });
-  }
-  let _lib = window.pdfjsLib ? wrap(window.pdfjsLib) : undefined;
-  Object.defineProperty(window, 'pdfjsLib', { configurable: true, get(){ return _lib; }, set(v){ _lib = wrap(v); } });
-
-  if(typeof printMealPlan === 'function'){
-    try{
-      const src = printMealPlan.toString().replace(/\(function\(\)\{\s*const discountInput[\s\S]*?\}\)\(\);/, '');
-      if(src !== printMealPlan.toString()) printMealPlan = (0, eval)('(' + src + ')');
-    }catch(e){ console.error('print fix skipped:', e); }
-  }
-})();
-</script>
-  <script id="meal-time-addon">
+<script id="meal-time-addon">
 /* Must-include dishes: choose WHICH MEAL each dish is served at.
    Every dish card gets a "Serve at" menu (Usual meal / Breakfast / Lunch / Snack / Dinner). The dish is then placed
    in that meal on every day it is required, and the plan builds the rest of that day around it. */
@@ -3261,9 +3215,11 @@ function downloadCsv(){
 
   if(typeof computeNeeds === 'function'){
     const _computeNeeds = computeNeeds, ROLE_OF = {Breakfast:'B', Lunch:'L', Snack:'SN', Dinner:'M'};
-    computeNeeds = function(forced, ...rest){
-      const mapped = (forced || []).map(f=>(f.slotPref && ROLE_OF[f.slotPref] && !['SD','DR','SH'].includes(f.role)) ? {...f, role: ROLE_OF[f.slotPref]} : f);
-      return _computeNeeds(mapped, ...rest);
+    computeNeeds = function(forced, includeShake, mealSlots, ...rest){
+      // only when that meal is actually in the schedule; otherwise the dish stays at its usual meal and must count there
+      const active = new Set(mealSlots || ['Breakfast','Lunch','Dinner']);
+      const mapped = (forced || []).map(f=>(f.slotPref && ROLE_OF[f.slotPref] && active.has(f.slotPref) && !['SD','DR','SH'].includes(f.role)) ? {...f, role: ROLE_OF[f.slotPref]} : f);
+      return _computeNeeds(mapped, includeShake, mealSlots, ...rest);
     };
   }
   window.__mealTime = {enhance};
