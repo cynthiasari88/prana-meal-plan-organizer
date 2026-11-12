@@ -1733,6 +1733,8 @@ let mealStructure = null; // parsed structure, or null when the request has no m
 
 const MS_SLOT_WORDS = {breakfast:'Breakfast', sarapan:'Breakfast', lunch:'Lunch', 'makan siang':'Lunch', snack:'Snack', snacks:'Snack', camilan:'Snack', dinner:'Dinner', supper:'Dinner', 'makan malam':'Dinner'};
 const MS_SLOT_ORDER = ['Breakfast','Lunch','Snack','Dinner'];
+const MS_EXACT = 0.01;      // how close the search tries to get every number (1% = 178–182 g for a 180 g target)
+const MS_TOPUP_COST = 4;    // small cost per "Added for target" portion, so they are only used when they really help
 const MS_WORDNUM = {a:1, an:1, one:1, two:2, three:3, four:4, satu:1, dua:2, tiga:3, empat:4};
 const MS_FILLER = new Set('a an the any some of small big large fresh light side extra healthy kind type choice optional per day daily each every serving portion piece pc pcs porsi item option with please also'.split(' '));
 const MS_VOCAB = {vegetable:'veg', veggie:'veg', veg:'veg', sayur:'veg', sayuran:'veg', fruit:'fruit', buah:'fruit',
@@ -1965,7 +1967,7 @@ function weekCounts(days, i){
   const start = i - (i % 7), counts = {};
   for(let d=start; d<start+7; d++){
     if(d===i || !days[d]) continue;
-    days[d].forEach(it=>{ if(!it.required) counts[it.name] = (counts[it.name]||0)+1; });
+    days[d].forEach(it=>{ if(!it.required && !it.topUp) counts[it.name] = (counts[it.name]||0)+1; });
   }
   return counts;
 }
@@ -1985,7 +1987,7 @@ function weeklyRepeatNote(days, rules){
   const rep = new Set();
   for(let w=0; w<Math.min(days.length,14); w+=7){
     const c = {};
-    days.slice(w, w+7).forEach(d=>d.forEach(it=>{ if(!it.required) c[it.name] = (c[it.name]||0)+1; }));
+    days.slice(w, w+7).forEach(d=>d.forEach(it=>{ if(!it.required && !it.topUp) c[it.name] = (c[it.name]||0)+1; }));
     Object.entries(c).forEach(([n,v])=>{ if(v>1) rep.add(n); });
   }
   return rep.size ? `No-repeat rule: the menu doesn't have enough options for these, so they appear more than once in a week: ${[...rep].join(', ')}.`
@@ -2015,12 +2017,13 @@ function balanceWeek(days, from, to, o){
     && items.some((y,j)=>j!==skip && y.slot===slot && MEAL_ROLES.includes(y.role) && y.cat===c.cat);
   const poolOf = it=> specs ? ((specs[it._spec]||{}).pool || [])
                             : ((pools[POOL_KEY_BY_ROLE[it.role]]||[]).filter(c=>!slotBanned(c, it.slot, rules)));
-  const sameKind = (x,y)=> specs ? (x._spec===y._spec && x._spec>=0) : (x.role===y.role && x.slot===y.slot);
-  const score = items=> scoreDay(items, targetKcal, tP, tF, tC, {}, pw);
+  const sameKind = (x,y)=> specs ? (x._spec===y._spec && x._spec>=0 && !x.topUp) : (x.role===y.role && x.slot===y.slot);
+  const score = items=> scoreDay(items, targetKcal, tP, tF, tC, {}, pw) + MS_TOPUP_COST*items.filter(x=>x.topUp).length;
+  const isTopSpec = si=> !!specs && si>=0 && !!specs[si] && !!specs[si].topUp;
   const sc = {}; idx.forEach(d=>{ sc[d] = score(days[d]); });
   const weekUse = ()=>{ const c = {}; idx.forEach(d=>days[d].forEach(it=>{ if(!it.required) c[dishKey(it)] = (c[dishKey(it)]||0)+1; })); return c; };
   const has = (items, c, skip)=> items.some((y,j)=>j!==skip && dishKey(y)===dishKey(c));
-  for(let iter=0; iter<250; iter++){
+  for(let iter=0; iter<400; iter++){
     const used = weekUse();
     let best = null, gain = 0.5;
     const tryMove = (g, mv)=>{ if(g > gain){ gain = g; best = mv; } };
@@ -2042,8 +2045,8 @@ function balanceWeek(days, from, to, o){
     idx.forEach(d=>{ const D = days[d];
       D.forEach((x,i)=>{ if(x.required) return;
         poolOf(x).forEach(c=>{
-          if(used[dishKey(c)] || has(D, c, i) || clash(D, c, x.slot, i)) return;
-          const D2 = D.slice(); D2[i] = {...c, slot:x.slot, _spec:x._spec};
+          if((used[dishKey(c)] && !isTopSpec(x._spec)) || (has(D, c, i) && !(isTopSpec(x._spec) && (countDishes(D)[dishKey(c)]||0) < maxCopies(c))) || clash(D, c, x.slot, i)) return;
+          const D2 = D.slice(); D2[i] = {...c, slot:x.slot, _spec:x._spec, ...(x.topUp?{topUp:true}:{})};
           const s2 = score(D2); tryMove(sc[d] - s2, {set:[[d,D2,s2]]});
         });
       });
@@ -2053,9 +2056,10 @@ function balanceWeek(days, from, to, o){
       D.forEach(x=>{ per[x._spec] = (per[x._spec]||0)+1; });
       specs.forEach((s,si)=>{
         if(s.fixed || (per[si]||0) >= s.max) return;
+        const cntD = countDishes(D);
         s.pool.forEach(c=>{
-          if(used[dishKey(c)] || has(D, c, -1) || clash(D, c, s.slot, -1)) return;
-          const D2 = D.concat([{...c, slot:s.slot, _spec:si}]); const s2 = score(D2); tryMove(sc[d] - s2, {set:[[d,D2,s2]]});
+          if(s.topUp ? (cntD[dishKey(c)]||0) >= maxCopies(c) : (used[dishKey(c)] || has(D, c, -1) || clash(D, c, s.slot, -1))) return;
+          const D2 = D.concat([{...c, slot:s.slot, _spec:si, ...(s.topUp?{topUp:true}:{})}]); const s2 = score(D2); tryMove(sc[d] - s2, {set:[[d,D2,s2]]});
         });
       });
       D.forEach((x,i)=>{
@@ -2138,7 +2142,12 @@ function resolveMealStructure(ms, P, B, rules){
       specs.push({slot, label, pool:allowed(partPool(p, slot), slot), min:p.min, max:p.max});
     }
   }));
-  const boosters = (B.side||[]).filter(d=>['protein','other','side','yogurt'].includes(d.cat) && !MS_VEG_RX.test(d.name) && d.kcal>=30 && !/sauce|dressing|oil|seeds|bread/i.test(d.name));
+  // Optional "Added for target" portions in lunch and dinner: small protein / egg / carb / yogurt / vegetable sides the
+  // search may add when the client's structure alone can't reach the calorie and P/F/C targets.
+  const boosters = (B.side||[]).filter(d=>['protein','other','side','yogurt'].includes(d.cat) || /avocado|edamame/i.test(d.name));
+  const boostSlots = ['Lunch','Dinner'].filter(x=>ms.slots.includes(x));
+  if(!boostSlots.length) boostSlots.push(ms.slots[ms.slots.length-1]);
+  boostSlots.forEach(slot=>{ const pool = boosters.filter(d=>!slotBanned(d, slot, rules)); if(pool.length) specs.push({slot, label:'added for target', pool, min:0, max:4, topUp:true}); });
   return {slots: ms.slots.slice(), specs, boosters};
 }
 // Builds one day that follows the structure. Local search over: swap a dish for another of the same kind,
@@ -2146,7 +2155,7 @@ function resolveMealStructure(ms, P, B, rules){
 // with several random starts, scored exactly like normal days (calories + P/F/C + variety).
 function generateStructuredDay(R, targetKcal, tP, tF, tC, usage, forcedItems, pw, ctx){
   const avoid = ctx && ctx.avoid;
-  const specs = R.specs.map(s=>s.fixed ? s : {...s, pool:freshOnly(s.pool, avoid)}), hasPFC = !!(tP||tF||tC); // no dish twice in a week
+  const specs = R.specs.map(s=>(s.fixed || s.topUp) ? s : {...s, pool:freshOnly(s.pool, avoid)}), hasPFC = !!(tP||tF||tC); // no dish twice in a week (top-up portions excepted)
   const U = it=>usage[it.name]||0;
   const base = [];
   specs.forEach((s,si)=>{ if(s.fixed) for(let n=0;n<s.min;n++) base.push({...s.fixed, slot:s.slot, required:true, _spec:si}); });
@@ -2163,10 +2172,12 @@ function generateStructuredDay(R, targetKcal, tP, tF, tC, usage, forcedItems, pw
   const clash = (items, c, slot, skip)=> MEAL_ROLES.includes(c.role) && c.cat!=='meat'
     && items.some((y,j)=>j!==skip && y.slot===slot && MEAL_ROLES.includes(y.role) && y.cat===c.cat);
   const S = (t,rep)=>scoreTotals(t.k,t.p,t.f,t.c,t.u,targetKcal,tP,tF,tC,pw)+rep;
-  const ok = (v,tg)=>!tg || Math.abs(v/tg-1)<=PFC_TOL;
+  const ok = (v,tg)=>!tg || Math.abs(v/tg-1)<=MS_EXACT;  // aim for every number within 1%, not just inside the tolerance
+  const isTop = si=> si>=0 && specs[si] && specs[si].topUp;
   let best = null, bestS = Infinity;
-  const restarts = hasPFC ? 30 : 12;
+  const restarts = hasPFC ? 30 : 12, t0 = performance.now();
   for(let r=0; r<restarts; r++){
+    if(r >= 4 && performance.now() - t0 > 250) break; // keep a 14-day plan to a few seconds even when the targets can't be fully met
     const items = base.slice(), cnt0 = countDishes(items);
     free.forEach(({s,si})=>{
       const n = Math.min(s.max, s.min + Math.floor(Math.random()*2));
@@ -2176,11 +2187,11 @@ function generateStructuredDay(R, targetKcal, tP, tF, tC, usage, forcedItems, pw
         const c = pick(avail); cnt0[dishKey(c)] = 1; items.push({...c, slot:s.slot, _spec:si});
       }
     });
-    for(let step=0; step<80; step++){
-      const t = tot(items), rep = repeatPenalty(items), cnt = countDishes(items), per = {};
+    for(let step=0; step<120; step++){
+      const t = tot(items), rep = repeatPenalty(items) + MS_TOPUP_COST*items.filter(x=>isTop(x._spec)).length, cnt = countDishes(items), per = {};
       items.forEach(x=>{ per[x._spec] = (per[x._spec]||0)+1; });
       let bestMove = null, mS = S(t,rep) - 0.01;
-      const repWith = arr=>repeatPenalty(arr);
+      const repWith = arr=>repeatPenalty(arr) + MS_TOPUP_COST*arr.filter(x=>isTop(x._spec)).length;
       items.forEach((x,i)=>{                                   // swap for another dish of the same kind
         if(x.required || x._spec<0) return;
         const xs = specs[x._spec], kx = dishKey(x);
@@ -2196,14 +2207,14 @@ function generateStructuredDay(R, targetKcal, tP, tF, tC, usage, forcedItems, pw
         s.pool.forEach(c=>{
           const kc = dishKey(c); if((cnt[kc]||0) >= maxCopies(c) || clash(items, c, s.slot, -1)) return;
           const nt = {k:t.k+c.kcal, p:t.p+c.p, f:t.f+c.f, c:t.c+c.c, u:t.u+U(c)};
-          const nr = c.role==='SD' ? repWith(items.concat([c])) : rep;
+          const nr = repWith(items.concat([{...c, _spec:si}]));
           const sc = S(nt,nr); if(sc<mS){ mS=sc; bestMove={add:si, c}; }
         });
       });
       items.forEach((x,i)=>{                                   // remove one where more than the minimum is there
         if(x.required || x._spec<0 || (per[x._spec]||0) <= specs[x._spec].min) return;
         const nt = {k:t.k-x.kcal, p:t.p-x.p, f:t.f-x.f, c:t.c-x.c, u:t.u-U(x)};
-        const nr = x.role==='SD' ? repWith(items.filter((_,j)=>j!==i)) : rep;
+        const nr = repWith(items.filter((_,j)=>j!==i));
         const sc = S(nt,nr); if(sc<mS){ mS=sc; bestMove={rem:i}; }
       });
       if(!bestMove) break;
@@ -2211,13 +2222,12 @@ function generateStructuredDay(R, targetKcal, tP, tF, tC, usage, forcedItems, pw
       else if(bestMove.add!==undefined) items.push({...bestMove.c, slot:specs[bestMove.add].slot, _spec:bestMove.add});
       else items.splice(bestMove.rem, 1);
     }
-    const t = tot(items), sc = S(t, repeatPenalty(items));
+    const t = tot(items), sc = S(t, repeatPenalty(items) + MS_TOPUP_COST*items.filter(x=>isTop(x._spec)).length);
     if(sc < bestS){ bestS = sc; best = items; }
     const bt = tot(best);
     if(hasPFC ? (ok(bt.k,targetKcal) && ok(bt.p,tP) && ok(bt.f,tF) && ok(bt.c,tC)) : Math.abs(bt.k/targetKcal-1) <= 0.01) break;
   }
-  let out = best.map(it=>({...it}));
-  if(ctx && ctx.topUp) out = topUpDay(out, R, {rules:ctx.rules, targetKcal, tP, tF, tC, pw}, avoid ? {...avoid} : null);
+  let out = best.map(it=>isTop(it._spec) ? {...it, topUp:true} : {...it});
   out.sort((a,b)=>MS_SLOT_ORDER.indexOf(a.slot)-MS_SLOT_ORDER.indexOf(b.slot));
   out.forEach(it=>{ usage[it.name] = (usage[it.name]||0)+1; });
   return out;
@@ -2522,7 +2532,7 @@ function scoreTotals(k,p,f,c,u,targetKcal,targetP,targetF,targetC,proteinWeight)
   if(targetC) score += err(c, targetC, 1);
   if(hasPFC && targetKcal > 0) score += err(k, targetKcal, 1);
   // Use a tiny tie-breaker for variety only; it cannot materially compromise PFC accuracy.
-  return score + u*8; // gentle preference for dishes not yet used on earlier days (a tie-breaker only: macro accuracy always wins)
+  return score + u*2; // gentle preference for dishes not yet used on earlier days (a tie-breaker only: macro accuracy always wins)
 }
 function scoreDay(items, targetKcal, targetP, targetF, targetC, usage, proteinWeight=3){
   let k=0,p=0,f=0,c=0,u=0;
@@ -3029,7 +3039,6 @@ document.getElementById('generateBtn').onclick = ()=>{
   // With "no same food in a week", plan each week as a whole so its last days are not left short.
   if(rules && rules.noRepeatWeek){
     for(let w=0; w<Math.min(numDays,14); w+=7) balanceWeek(days, w, Math.min(w+7, numDays, 14), {structure, rules, pools, targetKcal, tP, tF, tC, pw:proteinWeight});
-    if(structure) for(let i=0; i<Math.min(numDays,14); i++) days[i] = topUpDay(days[i], structure, {rules, targetKcal, tP, tF, tC, pw:proteinWeight}, weekCounts(days, i));
     for(let i=14; i<days.length; i++) days[i] = days[i%14].map(it=>({...it})); // repeats follow the balanced fortnight
   }
   // Guardrail: the generated plan must always contain exactly the requested delivery days.
@@ -3148,7 +3157,7 @@ function render(){
     const statuses = [statK,statP,statF,statC].filter(Boolean);
     const badgeHtml = (label, val, target, stat, unit='g', dp)=> stat ? `<span class="mstat"><i class="mdot ${stat}"></i><span class="mtext ${stat!=='good'?stat:''}">${label} ${num(val,dp)}${unit} / ${num(target,dp)}${unit} (${val>=target?'+':''}${Math.round((val/target-1)*100)}%)</span></span>` : '';
     const macroStatsHtml = statuses.length ? `<div class="macrostat">${badgeHtml('Calories',t.k,state.targetKcal,statK,' kcal',0)}${badgeHtml('Protein',t.p,state.tP,statP)}${badgeHtml('Fat',t.f,state.tF,statF)}${badgeHtml('Carb',t.c,state.tC,statC)}</div>` : '';
-    const dayWarnHtml = statuses.includes('bad') ? `<div class="warn soft" style="margin:0 0 0;">⚠ Calories or one or more macros landed well outside the ±${Math.round(PFC_TOL*200)}% range on this day — try "Reshuffle this day", or widen the menu pool (fewer exclusions) if it keeps happening.</div>` : '';
+    const dayWarnHtml = statuses.includes('bad') ? `<div class="warn soft" style="margin:0 0 0;">⚠ Calories or one or more macros are more than ±${Math.round(PFC_TOL*200)}% from target on this day (twice your ±${Math.round(PFC_TOL*100)}% tolerance) — try "Reshuffle this day", or widen the menu pool (fewer exclusions) if it keeps happening.</div>` : '';
     const rotation = state.rotationLabels?.[idx];
     const rotationTag = rotation ? `<span style="font-size:11px;font-weight:400;opacity:.8;margin-left:8px;">Week ${rotation.week} · Day ${rotation.day}</span>` : '';
     return `
@@ -3199,6 +3208,7 @@ function render(){
         <div class="sub">${n} day${n>1?'s':''} &middot; ${PLAN_TYPES.find(t=>t.value===state.planType).label}${state.activePackage?` &middot; PRANA ${state.activePackage.label}`:''}${state.isPreset?` (official menu, starting Week ${state.startWeek})`:state.rotationLabels?.length?` (custom rotation starts Week ${state.startWeek}, Day ${state.startDay})`:''} &middot; target ${num(state.targetKcal,0)} kcal/day ${state.tP?`&middot; P ${state.tP}g / F ${state.tF||'-'}g / C ${state.tC||'-'}g`:''}</div>
         ${lastSpecialRequest && lastSpecialRequest.summary ? `<div class="pkg-note" style="margin-top:8px;max-width:520px;"><b>Special request on file:</b> ${escapeHtml(lastSpecialRequest.summary)}</div>` : ''}
         ${state.rules && state.rules.noRepeatWeek ? `<div class="pkg-note" style="margin-top:6px;max-width:520px;">${escapeHtml(weeklyRepeatNote(state.days, state.rules))}</div>` : ''}
+        ${targetShortfallNote()}
       </div>
       <div class="toolbar">
         <button onclick="printMealPlan()">🖨️ Print / Save PDF</button>
@@ -3231,6 +3241,19 @@ function render(){
 
 document.querySelectorAll('input[name=showPrice]').forEach(r=>r.addEventListener('change', ()=>{ document.getElementById('discountBox').style.display = document.querySelector('input[name=showPrice]:checked').value==='disc' ? 'block' : 'none'; if(state.days.length) render(); }));
 ['discountPct','foodCostLimit'].forEach(id=>document.getElementById(id).addEventListener('input', ()=>{ if(state.days.length) render(); }));
+
+// When a meal structure / rules make the targets impossible on some days, say which days and what to loosen.
+function targetShortfallNote(){
+  if(!state.structure || !state.days.length) return '';
+  const miss = (v,tg)=> tg ? Math.abs(v/tg-1) : 0;
+  const off = [];
+  state.days.forEach((d,i)=>{ const t = totalsOf(d); const worst = Math.max(miss(t.k,state.targetKcal), miss(t.p,state.tP), miss(t.f,state.tF), miss(t.c,state.tC)); if(worst > PFC_TOL) off.push(`Day ${i+1}`); });
+  if(!off.length) return '';
+  const why = state.rules && state.rules.noRepeatWeek
+    ? `the meal structure together with "no same food in a week" leaves too few suitable dishes for these days. Allowing one more kind of dish (e.g. waffles at breakfast) or allowing repeats lets every day hit the target.`
+    : `the meal structure leaves too few suitable dishes. Allowing more kinds of dishes in the request lets every day hit the target.`;
+  return `<div class="warn soft" style="margin-top:8px;max-width:620px;"><b>${off.join(', ')}</b> ${off.length>1?'are':'is'} still more than ±${Math.round(PFC_TOL*100)}% from target: ${escapeHtml(why)}</div>`;
+}
 
 function printMealPlan(){
   if(!state.days.length){ alert('Generate a meal plan first.'); return; }
