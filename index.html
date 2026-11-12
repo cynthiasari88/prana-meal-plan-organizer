@@ -372,7 +372,7 @@
     <div class="section-h">Special Client Request</div>
     <div class="field">
       <label>Notes or a Custom Protocol (AI Analyzer)</label>
-      <div class="hint" style="margin-top:0;margin-bottom:8px;">Paste the client's special instructions below, and/or upload a PDF. Typing a P/F/C target (e.g. "P 100g, F 60g, C 100g") fills the PFC fields and generates the plan automatically (e.g. a custom breakdown like "Breakfast — mixed, 300-350g, avoid jamón/bacon/white rice"). Claude will read it and pull out an avoid-list and notes you can apply to this plan.</div>
+      <div class="hint" style="margin-top:0;margin-bottom:8px;">Paste the client's special instructions below, and/or upload a PDF. Write it meal by meal and every day is built exactly that way, e.g.<br><i>Breakfast: 1 fruit plate + 1 meal high protein<br>Lunch: Any<br>Snack: protein shakes<br>Dinner: Any + vegetables</i><br>Only the meals you list are served. Typing a P/F/C target (e.g. "P 100g, F 60g, C 100g") fills the PFC fields, and notes like "avoid bacon, white rice" or "14 days" are applied too.</div>
       <textarea id="specialRequestText" rows="4" placeholder="e.g. Breakfast at 8:00 granola and yogurt. No snack. No juice, cake. 14 days. P 100g, F 60g, C 100g — or: Breakfast at 08:00, mixed, 300-350g. Proteins: eggs, white cheese, salmon. Carbs: wild rice, quinoa, buckwheat. Avoid: jamón, bacon, syrniki, white bread, white rice, potatoes."></textarea>
       <input type="file" id="specialRequestFile" accept="application/pdf">
       <button type="button" class="secbtn" id="analyzeRequestBtn">🔎 Analyze Request</button>
@@ -1719,6 +1719,286 @@ function localAppliedHtml(did, ambiguous){
     + `<div class="pkg-note" style="margin-top:6px;">Your request is also saved as a note under the plan title.</div></div>`;
 }
 
+/* ================= MEAL STRUCTURE from the Special Client Request =================
+   When the request is written meal by meal, e.g.
+       Breakfast: 1 fruit plate + 1 meal high protein
+       Lunch: Any
+       Snack: protein shakes
+       Dinner: Any + vegetables
+   every generated day follows it exactly: only the meals listed are served, each meal holds exactly what
+   was asked for, and calories / P/F/C are matched by choosing WHICH dishes fill each part. Extra food to
+   reach the calorie target only goes into "Any" meals, never into a meal the client described exactly. */
+let mealStructure = null; // parsed structure, or null when the request has no meal-by-meal lines
+
+const MS_SLOT_WORDS = {breakfast:'Breakfast', sarapan:'Breakfast', lunch:'Lunch', 'makan siang':'Lunch', snack:'Snack', snacks:'Snack', camilan:'Snack', dinner:'Dinner', supper:'Dinner', 'makan malam':'Dinner'};
+const MS_SLOT_ORDER = ['Breakfast','Lunch','Snack','Dinner'];
+const MS_WORDNUM = {a:1, an:1, one:1, two:2, three:3, four:4, satu:1, dua:2, tiga:3, empat:4};
+const MS_FILLER = new Set('a an the any some of small big large fresh light side extra healthy kind type choice optional per day daily each every serving portion piece pc pcs porsi item option with please also'.split(' '));
+const MS_VOCAB = {vegetable:'veg', veggie:'veg', veg:'veg', sayur:'veg', sayuran:'veg', fruit:'fruit', buah:'fruit',
+  shake:'shake', smoothie:'shake', protein:'protein', soup:'soup', sup:'soup', salad:'salad', poke:'poke', pasta:'pasta', noodle:'pasta', mie:'pasta',
+  sandwich:'sandwich', wrap:'sandwich', panini:'sandwich', burger:'sandwich', kebab:'sandwich', dessert:'dessert', cake:'dessert', sweet:'dessert',
+  pudding:'dessert', cookie:'dessert', bar:'bar', drink:'drink', beverage:'drink', minuman:'drink', juice:'juice', jus:'juice', yogurt:'yogurt',
+  yoghurt:'yogurt', egg:'egg', telur:'egg', carb:'carb', carbohydrate:'carb', karbo:'carb', karbohidrat:'carb', starch:'carb', rice:'rice', nasi:'rice',
+  snack:'snack', camilan:'snack', meal:'meal', main:'meal', dish:'meal', food:'meal', makanan:'meal', lauk:'meal', course:'meal'};
+const MS_VEG_RX = /broccoli|cauliflower|cucumber|tomato|edamame|fried mushroom|zucchini|green beans|leek|paprika|bell pepper|beetroot|pumpkin|vegetables? grill|steam vegetables|red lentil/i;
+const MS_FRUIT_RX = /\b(apple|banana|grape|mango|orange|papaya|pear|pineapple|watermelon|avocado)\b/i;
+const msAllBase = B => [].concat(B.main||[], B.side||[], B.snack||[], B.shake||[], B.drink||[]);
+const msRich = arr => { const r = arr.filter(it=>it.kcal>0 && (it.p*4/it.kcal >= 0.25 || it.p >= 20)); return r.length ? r : arr.slice().sort((a,b)=>b.p/b.kcal - a.p/a.kcal).slice(0,3); };
+// What each kind of food means in the menu database. B = menu after the client's exclusions (not the High Protein filter,
+// because an explicitly requested food like vegetables or fruit must still be possible on a High Protein plan).
+const MS_CATS = {
+  veg:{label:'vegetable', side:true, pool:B=>(B.side||[]).filter(d=>MS_VEG_RX.test(d.name))},
+  fruit:{label:'fruit', side:true, pool:B=>(B.side||[]).filter(d=>d.cat==='produce' && MS_FRUIT_RX.test(d.name))},
+  shake:{label:'shake', pool:B=>B.shake||[]},
+  proteinShake:{label:'protein shake', pool:B=>{ const s=(B.shake||[]).filter(d=>/protein/i.test(d.name)); return s.length ? s : (B.shake||[]); }},
+  protein:{label:'protein portion', side:true, pool:B=>(B.side||[]).filter(d=>d.cat==='protein')},
+  soup:{label:'soup', pool:B=>(B.main||[]).filter(d=>d.cat==='soup')},
+  salad:{label:'salad', pool:B=>(B.main||[]).filter(d=>d.cat==='salad')},
+  poke:{label:'poke', pool:B=>(B.main||[]).filter(d=>d.cat==='poke')},
+  pasta:{label:'pasta / noodles', pool:B=>(B.main||[]).filter(d=>d.cat==='pasta')},
+  sandwich:{label:'sandwich / wrap', pool:B=>msAllBase(B).filter(d=>/sandwich|wrap|panini|burger|kebab|toast/i.test(d.name))},
+  dessert:{label:'dessert', pool:B=>(B.snack||[]).filter(d=>d.cat==='dessert')},
+  bar:{label:'bar', pool:B=>msAllBase(B).filter(d=>/\bbar\b/i.test(d.name))},
+  drink:{label:'drink', pool:B=>B.drink||[]},
+  juice:{label:'juice', pool:B=>(B.drink||[]).filter(d=>/juice/i.test(d.name))},
+  yogurt:{label:'yogurt', side:true, pool:B=>(B.side||[]).filter(d=>d.cat==='yogurt')},
+  egg:{label:'egg', side:true, pool:B=>msAllBase(B).filter(d=>/\begg|omelet|frittata|fritatta|shakshuka/i.test(d.name))},
+  carb:{label:'carb side', side:true, pool:B=>(B.side||[]).filter(d=>d.cat==='side' && !MS_VEG_RX.test(d.name))},
+  rice:{label:'rice', pool:B=>msAllBase(B).filter(d=>/\brice\b/i.test(d.name))},
+  snack:{label:'snack', pool:B=>B.snack||[]},
+};
+// small typos are fine: "plater" = "plate", "vegetabels" = "vegetables"
+function msLev(a,b){ const d=Array.from({length:a.length+1},(_,i)=>[i]); for(let j=1;j<=b.length;j++) d[0][j]=j;
+  for(let i=1;i<=a.length;i++) for(let j=1;j<=b.length;j++) d[i][j]=Math.min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); return d[a.length][b.length]; }
+function msTokEq(w, x){
+  if(w===x) return true;
+  if(Math.min(w.length,x.length)>=4 && Math.abs(w.length-x.length)<=2 && (w.startsWith(x)||x.startsWith(w))) return true;
+  return Math.min(w.length,x.length)>=5 && msLev(w,x)<=1;
+}
+function msFindDishes(toks){
+  if(!toks.length) return [];
+  const named = DB.map(d=>({d, t:reqTokens(d.name)}));
+  let hits = named.filter(x=>toks.every(w=>x.t.includes(w)));
+  if(!hits.length) hits = named.filter(x=>toks.every(w=>x.t.some(y=>msTokEq(w,y))));
+  if(currentPlanType()==='vegan'){ const v = hits.filter(x=>x.d.tags.includes('VEG')); if(v.length) hits = v; }
+  const exact = hits.filter(x=>x.t.length===toks.length);  // every word of the dish name was given
+  return (exact.length===1 ? exact : hits).map(x=>x.d);
+}
+// One part of a meal, e.g. "1 fruit plater", "1 meal high protein", "Any", "protein shakes", "vegetables".
+function msClassify(raw){
+  let s = String(raw||'').toLowerCase().replace(/[()\[\]"']/g,' ').replace(/\s+/g,' ').trim().replace(/[.!]+$/,'');
+  let count = null, m;
+  if((m = s.match(/^(\d{1,2})\s*(?:x|×)?\s*(?=[a-z])/))){ count = +m[1]; s = s.slice(m[0].length); }
+  else if((m = s.match(/^(a|an|one|two|three|four|satu|dua|tiga|empat)\s+/))){ count = MS_WORDNUM[m[1]]; s = s.slice(m[0].length); }
+  if((m = s.match(/\s*(?:x|×)\s*(\d{1,2})$/))){ count = +m[1]; s = s.slice(0, m.index); }
+  if(count!==null) count = Math.max(1, Math.min(6, count));
+  s = s.trim();
+  if(/^(?:any|anything|free|free choice|bebas|apa saja|terserah|random|whatever|chef'?s? choice|any (?:meal|dish|food)|normal|regular|as usual|biasa)$/.test(s)) return {kind:'any', text:raw.trim()};
+  const HP = /\bhigh[\s-]?protein\b|\bprotein[\s-]?rich\b|\btinggi\s+protein\b|\brich\s+in\s+protein\b/g;
+  const hp = HP.test(s); s = s.replace(HP,' ').replace(/\s+/g,' ').trim();
+  const plural = s.split(/[^a-z]+/).some(w=>/[a-z]{3,}s$/.test(w) && !/ss$/.test(w));
+  const toks = reqTokens(s).filter(w=>!MS_FILLER.has(w));
+  const n = (sideLike)=> count!==null ? {min:count, max:count} : (plural && sideLike ? {min:1, max:3} : {min:1, max:1});
+  if(!toks.length) return hp ? {kind:'meal', hp, ...n(false), text:raw.trim()} : {kind:'unknown', text:raw.trim()};
+  // a plain kind of food ("vegetables", "protein shake", "soup") — checked before dish names, so "vegetables" never becomes a pasta
+  if(toks.every(w=>MS_VOCAB[w])){
+    const kinds = toks.map(w=>MS_VOCAB[w]);
+    let cat = kinds.includes('shake') ? (kinds.includes('protein') ? 'proteinShake' : 'shake')
+            : (kinds.find(k=>k!=='meal' && k!=='protein') || (kinds.includes('protein') ? 'protein' : 'meal'));
+    if(cat==='meal') return {kind:'meal', hp, ...n(false), text:raw.trim()};
+    return {kind:'cat', cat, hp, ...n(!!MS_CATS[cat].side), text:raw.trim()};
+  }
+  // food groups whose dishes don't all carry the word in their name
+  const GROUPS = {fish:/fish|salmon|tuna|tuno|snapper|mahi|baramundi/i, ikan:/fish|salmon|tuna|tuno|snapper|mahi|baramundi/i,
+    seafood:/fish|salmon|tuna|tuno|snapper|mahi|baramundi|shrimp|prawn|squid|crab|calamari/i,
+    meat:/beef|mignon|chicken|liver/i, daging:/beef|mignon|chicken|liver/i, beef:/beef|mignon/i, chicken:/chicken/i, ayam:/chicken/i};
+  if(toks.length===1 && GROUPS[toks[0]]){
+    const items = DB.filter(d=>d.role!=='SD' && d.role!=='DR' && GROUPS[toks[0]].test(d.name));
+    if(items.length) return {kind:'match', items, hp, label:s, ...n(false), text:raw.trim()};
+  }
+  const hits = msFindDishes(toks);
+  if(hits.length===1) return {kind:'dish', item:hits[0], ...(count!==null ? {min:count, max:count} : {min:1, max:1}), text:raw.trim()};
+  if(hits.length>1) return {kind:'match', items:hits, hp, label:s, ...n(false), text:raw.trim()};
+  const known = toks.map(w=>MS_VOCAB[w]).find(k=>k && k!=='meal'); // e.g. "grilled fish soup" -> soup
+  if(known && known!=='protein') return {kind:'cat', cat:known, hp, ...n(!!MS_CATS[known].side), text:raw.trim()};
+  return {kind:'unknown', text:raw.trim()};
+}
+function msParseContent(content){
+  const c = String(content||'').trim();
+  if(/^(?:none|no|nothing|skip|off|-+|—|tidak(?:\s+ada)?|libur|n\/a)\.?$/i.test(c)) return null; // meal not served
+  const parts = [];
+  c.split(/\s*(?:\+|,|&|;)\s*/).forEach(seg=>{
+    if(!seg.trim()) return;
+    const whole = msClassify(seg);
+    // "fish and vegetables" = two parts; but a real dish name containing "and" stays one dish
+    if(whole.kind==='dish' || !/\s(?:and|dan|plus|n)\s/i.test(seg)) { parts.push(whole); return; }
+    seg.split(/\s+(?:and|dan|plus|n)\s+/i).forEach(x=>{ if(x.trim()) parts.push(msClassify(x)); });
+  });
+  return parts;
+}
+// Finds the meal-by-meal lines. Returns {structure, rest} where rest is every other line of the request.
+function splitMealStructure(text){
+  const src = String(text||'').replace(/[;|]\s*(?=(?:breakfast|lunch|snacks?|dinner|supper|sarapan|camilan|makan\s+siang|makan\s+malam)\b)/gi, '\n');
+  const found = [], rest = [];
+  src.split(/\r?\n/).forEach(line=>{
+    const m = line.match(/^\s*(?:[-•*>]|\d+[.)])?\s*(breakfast|lunch|snacks?|dinner|supper|sarapan|camilan|makan\s+siang|makan\s+malam)\b(.*)$/i);
+    if(m){
+      const tail = m[2].replace(/\([^)]*\)/g,' ').replace(/\b(?:at|jam|pukul|around)\b/gi,' ')
+        .replace(/\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?/gi,' ').replace(/\b\d{1,2}\s*(?:am|pm)\b/gi,' ');
+      const s = tail.match(/^\s*(?:~\s*)?[:=\-–—>]+\s*(.*)$/);
+      if(s && s[1].trim()){ found.push({slot: MS_SLOT_WORDS[m[1].toLowerCase().replace(/\s+/g,' ')], content: s[1]}); return; }
+    }
+    rest.push(line);
+  });
+  if(found.length < 2) return {structure:null, rest:String(text||'')};
+  const bySlot = {}, off = [];
+  found.forEach(f=>{
+    const parts = msParseContent(f.content);
+    if(parts===null){ off.push(f.slot); return; }
+    bySlot[f.slot] = (bySlot[f.slot]||[]).concat(parts);
+  });
+  const slots = MS_SLOT_ORDER.filter(s=>bySlot[s] && bySlot[s].length && !off.includes(s));
+  if(!slots.length) return {structure:null, rest:String(text||'')};
+  const unknown = [];
+  slots.forEach(s=>bySlot[s].forEach(p=>{ if(p.kind==='unknown') unknown.push(`${s}: "${p.text}"`); }));
+  slots.forEach(s=>{ bySlot[s] = bySlot[s].filter(p=>p.kind!=='unknown'); if(!bySlot[s].length) bySlot[s] = [{kind:'any', text:'Any'}]; });
+  return {structure:{slots, bySlot, unknown}, rest: rest.join('\n')};
+}
+function msPartLabel(p){
+  const q = p.min===p.max ? `${p.min}` : `${p.min}–${p.max}`;
+  if(p.kind==='any') return 'Any (1–2 dishes, plus sides/drink if needed for the targets)';
+  if(p.kind==='dish') return `${q} × ${p.item.name}`;
+  if(p.kind==='meal') return `${q} ${p.hp?'high-protein ':''}meal${p.max>1?'s':''}`;
+  if(p.kind==='match') return `${q} ${p.hp?'high-protein ':''}dish matching "${p.label}" (${p.items.length} options)`;
+  return `${q} ${p.hp?'high-protein ':''}${MS_CATS[p.cat].label}${MS_CATS[p.cat].side?' portion'+(p.max>1?'s':''):''}`;
+}
+function mealStructureHtml(ms){
+  if(!ms) return '';
+  return `<div class="pricebox" style="margin-top:10px;display:block;"><b>Meal structure applied — every day is built like this:</b>`
+    + ms.slots.map(s=>`<div class="pkg-note" style="margin-top:4px;"><b>${s}:</b> ${ms.bySlot[s].map(msPartLabel).map(escapeHtml).join(' + ')}</div>`).join('')
+    + `<div class="pkg-note" style="margin-top:6px;">Meals not listed are not served. While this is active, the Meal Schedule and Protein Shake settings are ignored.</div>`
+    + (ms.unknown.length ? `<div class="warn soft" style="margin:8px 0 0;">Couldn't match these to the menu, so they were left out: <b>${ms.unknown.map(escapeHtml).join(', ')}</b>. Use a dish name from the menu (or a word like "vegetables", "fruit", "soup", "protein shake", "any").</div>` : '')
+    + `<button type="button" class="secbtn" id="clearMealStructureBtn" style="margin-top:8px;">✕ Stop using this meal structure</button></div>`;
+}
+function bindMealStructureClear(){
+  const b = document.getElementById('clearMealStructureBtn');
+  if(b) b.onclick = ()=>{ mealStructure = null; b.parentElement.innerHTML = '<b>Meal structure removed.</b><div class="pkg-note">Plans now follow the Meal Schedule setting again — click Generate to rebuild.</div>'; };
+}
+function setMealStructure(ms){
+  mealStructure = ms;
+  if(!ms) return;
+  const code = ms.slots.includes('Snack') ? 'BLSD' : ms.slots.map(s=>s[0]).join('');
+  const sel = document.getElementById('mealSchedule');
+  if([...sel.options].some(o=>o.value===code)){ sel.value = code; sel.dispatchEvent(new Event('change')); }
+}
+// Meal dishes that suit the meal they are served at: breakfast dishes at breakfast, and no pancakes/waffles/muffins at
+// lunch or dinner — as long as at least 3 options remain after the client's filters, otherwise every meal dish is allowed.
+function msForSlot(pool, slot){
+  const keep = slot==='Breakfast' ? pool.filter(d=>d.role==='B') : (slot==='Snack' ? pool : pool.filter(d=>d.role!=='B'));
+  return keep.length >= 3 ? keep : pool;
+}
+// Turns the structure into concrete menu lists for this plan (plan type and exclusions already applied).
+function resolveMealStructure(ms, P, B){
+  const specs = [];
+  const inBase = new Set(msAllBase(B).map(d=>d.name));
+  ms.slots.forEach(slot=>ms.bySlot[slot].forEach(p=>{
+    const label = msPartLabel(p);
+    if(p.kind==='any'){
+      specs.push({slot, label:'any dish', pool:msForSlot(P.main||[], slot), min:1, max:2});
+      specs.push({slot, label:'side', pool:(P.side||[]), min:0, max:3});
+      specs.push({slot, label:'drink', pool:(P.drink||[]), min:0, max:1});
+    } else if(p.kind==='dish'){
+      specs.push({slot, label, fixed:p.item, pool:[], min:p.min, max:p.min});
+    } else {
+      let pool = p.kind==='meal' ? msForSlot(p.hp ? msRich(B.main||[]) : (P.main||[]), slot)
+               : p.kind==='match' ? (p.items.filter(d=>inBase.has(d.name)).length ? p.items.filter(d=>inBase.has(d.name)) : p.items)
+               : MS_CATS[p.cat].pool(B);
+      if(p.hp && p.kind!=='meal') pool = msRich(pool);
+      specs.push({slot, label, pool, min:p.min, max:p.max});
+    }
+  }));
+  return {slots: ms.slots.slice(), specs};
+}
+// Builds one day that follows the structure. Local search over: swap a dish for another of the same kind,
+// add one more (only where the structure allows a range, e.g. "Any" or "vegetables"), or remove one,
+// with several random starts, scored exactly like normal days (calories + P/F/C + variety).
+function generateStructuredDay(R, targetKcal, tP, tF, tC, usage, forcedItems, pw){
+  const specs = R.specs, hasPFC = !!(tP||tF||tC);
+  const U = it=>usage[it.name]||0;
+  const base = [];
+  specs.forEach((s,si)=>{ if(s.fixed) for(let n=0;n<s.min;n++) base.push({...s.fixed, slot:s.slot, required:true, _spec:si}); });
+  (forcedItems||[]).forEach(it=>{ // dishes from "Must-include menus"
+    if(base.some(b=>dishKey(b)===dishKey(it))) return;
+    let slot = (it.slotPref && R.slots.includes(it.slotPref)) ? it.slotPref : ROLE_SLOT[it.role];
+    if(!R.slots.includes(slot)) slot = preferredAddSlot(R.slots);
+    base.push({...it, slot, required:true, _spec:-1});
+  });
+  const free = specs.map((s,si)=>({s,si})).filter(x=>!x.s.fixed && x.s.pool.length);
+  const tot = arr=>{ let k=0,p=0,f=0,c=0,u=0; arr.forEach(it=>{ k+=it.kcal; p+=it.p; f+=it.f; c+=it.c; u+=U(it); }); return {k,p,f,c,u}; };
+  // two dishes of the same type in one meal (two sobas, two soups, two pokes) look wrong on a client's plan
+  const MEAL_ROLES = ['B','L','M','SN'];
+  const clash = (items, c, slot, skip)=> MEAL_ROLES.includes(c.role) && c.cat!=='meat'
+    && items.some((y,j)=>j!==skip && y.slot===slot && MEAL_ROLES.includes(y.role) && y.cat===c.cat);
+  const S = (t,rep)=>scoreTotals(t.k,t.p,t.f,t.c,t.u,targetKcal,tP,tF,tC,pw)+rep;
+  const ok = (v,tg)=>!tg || Math.abs(v/tg-1)<=PFC_TOL;
+  let best = null, bestS = Infinity;
+  const restarts = hasPFC ? 30 : 12;
+  for(let r=0; r<restarts; r++){
+    const items = base.slice(), cnt0 = countDishes(items);
+    free.forEach(({s,si})=>{
+      const n = Math.min(s.max, s.min + Math.floor(Math.random()*2));
+      for(let j=0;j<n;j++){
+        const avail = s.pool.filter(c=>!cnt0[dishKey(c)] && !clash(items, c, s.slot, -1));
+        if(!avail.length) break;
+        const c = pick(avail); cnt0[dishKey(c)] = 1; items.push({...c, slot:s.slot, _spec:si});
+      }
+    });
+    for(let step=0; step<80; step++){
+      const t = tot(items), rep = repeatPenalty(items), cnt = countDishes(items), per = {};
+      items.forEach(x=>{ per[x._spec] = (per[x._spec]||0)+1; });
+      let bestMove = null, mS = S(t,rep) - 0.01;
+      const repWith = arr=>repeatPenalty(arr);
+      items.forEach((x,i)=>{                                   // swap for another dish of the same kind
+        if(x.required || x._spec<0) return;
+        const xs = specs[x._spec], kx = dishKey(x);
+        xs.pool.forEach(c=>{
+          const kc = dishKey(c); if(kc===kx || (cnt[kc]||0) >= maxCopies(c) || clash(items, c, x.slot, i)) return;
+          const nt = {k:t.k-x.kcal+c.kcal, p:t.p-x.p+c.p, f:t.f-x.f+c.f, c:t.c-x.c+c.c, u:t.u-U(x)+U(c)};
+          const nr = (x.role==='SD'||c.role==='SD') ? repWith(items.map((y,j)=>j===i?c:y)) : rep;
+          const sc = S(nt,nr); if(sc<mS){ mS=sc; bestMove={swap:i, c}; }
+        });
+      });
+      free.forEach(({s,si})=>{                                 // add one more where a range is allowed
+        if((per[si]||0) >= s.max) return;
+        s.pool.forEach(c=>{
+          const kc = dishKey(c); if((cnt[kc]||0) >= maxCopies(c) || clash(items, c, s.slot, -1)) return;
+          const nt = {k:t.k+c.kcal, p:t.p+c.p, f:t.f+c.f, c:t.c+c.c, u:t.u+U(c)};
+          const nr = c.role==='SD' ? repWith(items.concat([c])) : rep;
+          const sc = S(nt,nr); if(sc<mS){ mS=sc; bestMove={add:si, c}; }
+        });
+      });
+      items.forEach((x,i)=>{                                   // remove one where more than the minimum is there
+        if(x.required || x._spec<0 || (per[x._spec]||0) <= specs[x._spec].min) return;
+        const nt = {k:t.k-x.kcal, p:t.p-x.p, f:t.f-x.f, c:t.c-x.c, u:t.u-U(x)};
+        const nr = x.role==='SD' ? repWith(items.filter((_,j)=>j!==i)) : rep;
+        const sc = S(nt,nr); if(sc<mS){ mS=sc; bestMove={rem:i}; }
+      });
+      if(!bestMove) break;
+      if(bestMove.swap!==undefined){ const x = items[bestMove.swap]; items[bestMove.swap] = {...bestMove.c, slot:x.slot, _spec:x._spec}; }
+      else if(bestMove.add!==undefined) items.push({...bestMove.c, slot:specs[bestMove.add].slot, _spec:bestMove.add});
+      else items.splice(bestMove.rem, 1);
+    }
+    const t = tot(items), sc = S(t, repeatPenalty(items));
+    if(sc < bestS){ bestS = sc; best = items; }
+    const bt = tot(best);
+    if(hasPFC ? (ok(bt.k,targetKcal) && ok(bt.p,tP) && ok(bt.f,tF) && ok(bt.c,tC)) : Math.abs(bt.k/targetKcal-1) <= 0.01) break;
+  }
+  const out = best.map(({_spec, ...it})=>it);
+  out.sort((a,b)=>MS_SLOT_ORDER.indexOf(a.slot)-MS_SLOT_ORDER.indexOf(b.slot));
+  out.forEach(it=>{ usage[it.name] = (usage[it.name]||0)+1; });
+  return out;
+}
+
 document.getElementById('analyzeRequestBtn').onclick = async ()=>{
   const btn = document.getElementById('analyzeRequestBtn');
   const resultEl = document.getElementById('specialRequestResult');
@@ -1739,16 +2019,22 @@ document.getElementById('analyzeRequestBtn').onclick = async ()=>{
     return;
   }
 
+  // Meal-by-meal lines ("Breakfast: ...", "Lunch: ...") become the structure of every day; they are taken out
+  // before the other rules run, so e.g. "vegetables" or "high protein" there only apply to that meal.
+  const split = text ? splitMealStructure(text) : {structure:null, rest:''};
+  setMealStructure(split.structure);
   // P/F/C typed in the notes is read locally and applied straight away.
-  const local = text ? applyLocalRequest(text) : { did:[], pfc:null, ambiguous:[] };
+  const local = split.rest.trim() ? applyLocalRequest(split.rest) : { did:[], pfc:null, ambiguous:[] };
+  const structureHtml = mealStructureHtml(split.structure);
+  const showLocal = ()=> structureHtml + (local.did.length ? localAppliedHtml(local.did, local.ambiguous) : '');
   // Whatever the request says, it is kept as a note under the plan title (printed with the plan).
   if(text) lastSpecialRequest = { summary: text.length>600 ? text.slice(0,600)+'…' : text };
   const localPfc = local.pfc;
   const pfcApplied = !!(localPfc && (localPfc.p||localPfc.f||localPfc.c));
-  const localDone = local.did.length > 0;
+  const localDone = local.did.length > 0 || !!split.structure;
   let shouldGenerate = localDone;
   if(localDone && !file){
-    resultEl.innerHTML = localAppliedHtml(local.did, local.ambiguous);
+    resultEl.innerHTML = showLocal(); bindMealStructureClear();
     document.getElementById('generateBtn').click();
     return;
   }
@@ -1794,6 +2080,7 @@ If a field has nothing to report, use an empty array (or empty string for summar
       if(applyPfcToForm(aiPfc)) shouldGenerate = true;
     }
     renderSpecialRequestResult(parsed);
+    if(structureHtml){ resultEl.insertAdjacentHTML('afterbegin', structureHtml); bindMealStructureClear(); }
     if(shouldGenerate){
       const ab = document.getElementById('applySpecialRequestBtn'); if(ab) ab.click(); // also apply the Avoid list
       document.getElementById('generateBtn').click();
@@ -1805,7 +2092,7 @@ If a field has nothing to report, use an empty array (or empty string for summar
           ? `The AI analyzer is unavailable right now. Paste the key text into the box above instead — simple rules like "no snack", "avoid bacon, white rice" or "P 100g, F 60g, C 100g" are read directly.`
           : `Your request is saved as a note under the plan title (it prints with the plan), but I couldn't turn it into settings automatically. These are applied directly: diets and allergies ("pescetarian", "vegetarian", "halal", "gluten-free", "dairy-free", "nut allergy"), dishes by name ("breakfast Granola and yogurt"), "no snack / no shake", "avoid bacon, white rice", "no juice / cake", "lunch and dinner only", "14 days", "vegan" / "high protein", and P/F/C like "P 100g, F 60g, C 100g". For anything else, use the boxes above — or tell me the request and I'll set it up.`)
       : `Couldn't analyze the request (${escapeHtml(err.message)}). You can still add exclusions manually above.`;
-    resultEl.innerHTML = (localDone ? localAppliedHtml(local.did, local.ambiguous) : '') + `<div class="warn soft" style="margin:10px 0 0;">${msg}</div>`;
+    resultEl.innerHTML = (localDone ? showLocal() : '') + `<div class="warn soft" style="margin:10px 0 0;">${msg}</div>`; bindMealStructureClear();
     if(localDone) document.getElementById('generateBtn').click();
     else if(state.days.length) render(); // show the saved note on the plan that is already on screen
   } finally {
@@ -2157,7 +2444,8 @@ function fineTune(items, pools, targetKcal, tP, tF, tC, usage, pw, mealSlots){
   return items;
 }
 
-function generateOneDay(pools, includeShake, targetKcal, targetP, targetF, targetC, usage, forcedItems, proteinWeight=3, attempts=700, mealSlots=['Breakfast','Lunch','Dinner']){
+function generateOneDay(pools, includeShake, targetKcal, targetP, targetF, targetC, usage, forcedItems, proteinWeight=3, attempts=700, mealSlots=['Breakfast','Lunch','Dinner'], structure=null){
+  if(structure) return generateStructuredDay(structure, targetKcal, targetP, targetF, targetC, usage, forcedItems, proteinWeight);
   const activeSlots = new Set(mealSlots);
   const forced = (forcedItems||[]).map(it=>{
     let slot = ROLE_SLOT[it.role];
@@ -2373,7 +2661,7 @@ document.getElementById('generateBtn').onclick = ()=>{
   const includeShake = document.getElementById('includeShake').checked;
   const scheduleCode = document.getElementById('mealSchedule').value || 'BLD';
   const scheduleMap = {B:['Breakfast'],L:['Lunch'],D:['Dinner'],BL:['Breakfast','Lunch'],BD:['Breakfast','Dinner'],LD:['Lunch','Dinner'],BLD:['Breakfast','Lunch','Dinner'],BLSD:['Breakfast','Lunch','Snack','Dinner']};
-  const mealSlots = scheduleMap[scheduleCode] || scheduleMap.BLD;
+  const mealSlots = mealStructure ? mealStructure.slots.slice() : (scheduleMap[scheduleCode] || scheduleMap.BLD); // a meal structure decides which meals are served
   const includeSnack = mealSlots.includes('Snack');
   document.getElementById('includeSnack').checked = includeSnack;
   const deliveryFee = parseInt(document.querySelector('input[name=deliv]:checked').value);
@@ -2382,7 +2670,7 @@ document.getElementById('generateBtn').onclick = ()=>{
   // PRANA's fixed weekly presets cannot be reshaped into a custom meal schedule. If the
   // client asks for fewer/different meal occasions, switch to Custom generation so the
   // selected schedule is honored and an official full-package price is not shown incorrectly.
-  if(scheduleCode!=='BLD' && PRESET_PLANS[activePackageId]) selectPackage('custom');
+  if((scheduleCode!=='BLD' || mealStructure) && PRESET_PLANS[activePackageId]) selectPackage('custom');
 
   // A package with real fixed-menu data on file plays back PRANA's actual weekly rotation
   // verbatim — no generation, no exclusions, no must-include logic. This is what "the data
@@ -2441,6 +2729,7 @@ document.getElementById('generateBtn').onclick = ()=>{
 
   const filterFn = buildExclusionFilter(planType);
   const pools = poolsFromFilter(filterFn);
+  const basePools = {...pools}; // after exclusions, before the High Protein filter (for foods a meal structure asks for by name)
   if(!includeSnack) pools.snack = []; // snack is only available in the four-meal schedule
 
   // High Protein plan: keep ONLY dishes that are genuinely protein-rich, judged from the menu data
@@ -2470,6 +2759,7 @@ document.getElementById('generateBtn').onclick = ()=>{
     const pos = (rotationStartOffset + i) % 14;
     return {week:Math.floor(pos/7)+1, day:(pos%7)+1};
   });
+  const structure = mealStructure ? resolveMealStructure(mealStructure, pools, basePools) : null;
   const forcedByDay = [];
   for(let d=0; d<numDays; d++){
     forcedByDay.push(requiredItems.filter(r=> r.dayAssignment==='all' || r.dayAssignment===(d%14)).map(r=>r.item));
@@ -2486,7 +2776,7 @@ document.getElementById('generateBtn').onclick = ()=>{
       days.push(days[i%14].map(it=>({...it})));
       continue;
     }
-    days.push(generateOneDay(pools, includeShake, targetKcal, tP, tF, tC, usage, forcedByDay[i], proteinWeight, 700, mealSlots));
+    days.push(generateOneDay(pools, includeShake, targetKcal, tP, tF, tC, usage, forcedByDay[i], proteinWeight, 700, mealSlots, structure));
   }
   // Guardrail: the generated plan must always contain exactly the requested delivery days.
   while(days.length<numDays && days.length>0) days.push(days[days.length%14].map(it=>({...it})));
@@ -2495,13 +2785,13 @@ document.getElementById('generateBtn').onclick = ()=>{
   const pkg = PRANA_PACKAGES.find(p=>p.id===activePackageId);
   const packagePrice = (pkg && pkg.id!=='custom') ? packagePriceForDays(pkg.id, numDays) : null;
 
-  state = {days, deliveryDurationDays:numDays, usage, clientName, targetKcal, deliveryFee, pools, includeShake, tP, tF, tC, forcedByDay, proteinWeight, planType, activePackage: pkg && pkg.id!=='custom' ? pkg : null, packagePrice, isPreset:false, mealSlots, startWeek:activePackageId==='custom'?startWeek:1, startDay:activePackageId==='custom'?startDay:1, rotationLabels};
+  state = {days, deliveryDurationDays:numDays, usage, clientName, targetKcal, deliveryFee, pools, includeShake, tP, tF, tC, forcedByDay, proteinWeight, planType, activePackage: pkg && pkg.id!=='custom' ? pkg : null, packagePrice, isPreset:false, mealSlots, structure, startWeek:activePackageId==='custom'?startWeek:1, startDay:activePackageId==='custom'?startDay:1, rotationLabels};
   render();
 };
 
 function regenDay(idx){
   if(state.isPreset || !state.pools) return;
-  const items = generateOneDay(state.pools, state.includeShake, state.targetKcal, state.tP, state.tF, state.tC, state.usage, state.forcedByDay[idx], state.proteinWeight, 700, state.mealSlots || ['Breakfast','Lunch','Dinner']);
+  const items = generateOneDay(state.pools, state.includeShake, state.targetKcal, state.tP, state.tF, state.tC, state.usage, state.forcedByDay[idx], state.proteinWeight, 700, state.mealSlots || ['Breakfast','Lunch','Dinner'], state.structure || null);
   state.days[idx] = items;
   render();
 }
@@ -3101,7 +3391,7 @@ function downloadCsv(){
     const target = Math.min(n, 14);
     for(let k = state.cycle.length; k < target; k++){
       state.cycle.push(generateOneDay(state.pools, state.includeShake, state.targetKcal, state.tP, state.tF, state.tC, state.usage || (state.usage = {}),
-        forcedFor(k), state.proteinWeight || 3, 700, state.mealSlots || ['Breakfast','Lunch','Dinner']));
+        forcedFor(k), state.proteinWeight || 3, 700, state.mealSlots || ['Breakfast','Lunch','Dinner'], state.structure || null));
     }
   }
   // Everything that depends on the number of days must follow the new length too, otherwise the summary,
