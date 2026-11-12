@@ -1993,17 +1993,21 @@ function computeNeeds(forced, includeShake, mealSlots){
 // Error is measured in % of each target (not raw grams), so a 10% miss on fat counts the same
 // as a 10% miss on protein or carb, and all three compete fairly against the calorie target.
 function scoreTotals(k,p,f,c,u,targetKcal,targetP,targetF,targetC,proteinWeight){
-  // When P/F/C is specified, macro accuracy is the primary objective. Calories are
-  // secondary (especially when PFC-derived kcal is enabled), and variety must never
-  // outweigh a nutritionally closer result.
+  // When P/F/C is specified, calories and each set macro are all primary objectives,
+  // and variety must never outweigh a nutritionally closer result.
   const targets = [targetP, targetF, targetC].filter(v => Number.isFinite(v) && v > 0);
   const hasPFC = targets.length > 0;
   const macroScale = hasPFC ? 1000 : 0;
   let score = hasPFC ? 0 : Math.abs(k-targetKcal);
-  if(targetP) score += Math.abs(p-targetP)/targetP*macroScale*(proteinWeight/3);
-  if(targetF) score += Math.abs(f-targetF)/targetF*macroScale;
-  if(targetC) score += Math.abs(c-targetC)/targetC*macroScale;
-  if(hasPFC) score += Math.abs(k-targetKcal)/Math.max(targetKcal,1)*100;
+  // Every target the nutritionist set must land inside the Match Tolerance, so each error grows
+  // steeply once it leaves that band. Calories count as much as a macro: before this, a 20% calorie
+  // miss cost the same as a 1% protein miss, so days came out hundreds of kcal under target.
+  const tol = (typeof PFC_TOL === 'number' && PFC_TOL > 0) ? PFC_TOL : 0.05;
+  const err = (v, tg, w)=>{ const e = Math.abs(v-tg)/tg; return (e + Math.max(0, e-tol)*4)*macroScale*w; };
+  if(targetP) score += err(p, targetP, proteinWeight/3);
+  if(targetF) score += err(f, targetF, 1);
+  if(targetC) score += err(c, targetC, 1);
+  if(hasPFC && targetKcal > 0) score += err(k, targetKcal, 1);
   // Use a tiny tie-breaker for variety only; it cannot materially compromise PFC accuracy.
   return score + u*8; // gentle preference for dishes not yet used on earlier days (a tie-breaker only: macro accuracy always wins)
 }
@@ -2183,7 +2187,7 @@ function generateOneDay(pools, includeShake, targetKcal, targetP, targetF, targe
     if(hasPFC){
       const t = totalsOf(final);
       const ok = (v,tg)=>!tg || Math.abs(v/tg-1)<=PFC_TOL;
-      if(ok(t.p,targetP) && ok(t.f,targetF) && ok(t.c,targetC)) break;
+      if(ok(t.k,targetKcal) && ok(t.p,targetP) && ok(t.f,targetF) && ok(t.c,targetC)) break; // keep searching until calories are in range too
     }
   }
   // The rules are built into every step above; this only catches anything that slipped through.
@@ -2596,10 +2600,11 @@ function render(){
     });
     const pPct = t.p*4, fPct = t.f*9, cPct = t.c*4, totCal=pPct+fPct+cPct || 1;
     const statP = macroStatus(t.p, state.tP), statF = macroStatus(t.f, state.tF), statC = macroStatus(t.c, state.tC);
-    const statuses = [statP,statF,statC].filter(Boolean);
-    const badgeHtml = (label, val, target, stat)=> stat ? `<span class="mstat"><i class="mdot ${stat}"></i><span class="mtext ${stat!=='good'?stat:''}">${label} ${num(val)}g / ${target}g (${val>=target?'+':''}${Math.round((val/target-1)*100)}%)</span></span>` : '';
-    const macroStatsHtml = statuses.length ? `<div class="macrostat">${badgeHtml('Protein',t.p,state.tP,statP)}${badgeHtml('Fat',t.f,state.tF,statF)}${badgeHtml('Carb',t.c,state.tC,statC)}</div>` : '';
-    const dayWarnHtml = statuses.includes('bad') ? `<div class="warn soft" style="margin:0 0 0;">⚠ One or more macros landed well outside the ±${Math.round(PFC_TOL*200)}% range on this day — try "Reshuffle this day", or widen the menu pool (fewer exclusions) if it keeps happening.</div>` : '';
+    const statK = macroStatus(t.k, state.targetKcal); // calories are flagged the same way as the macros, so a short day is visible
+    const statuses = [statK,statP,statF,statC].filter(Boolean);
+    const badgeHtml = (label, val, target, stat, unit='g', dp)=> stat ? `<span class="mstat"><i class="mdot ${stat}"></i><span class="mtext ${stat!=='good'?stat:''}">${label} ${num(val,dp)}${unit} / ${num(target,dp)}${unit} (${val>=target?'+':''}${Math.round((val/target-1)*100)}%)</span></span>` : '';
+    const macroStatsHtml = statuses.length ? `<div class="macrostat">${badgeHtml('Calories',t.k,state.targetKcal,statK,' kcal',0)}${badgeHtml('Protein',t.p,state.tP,statP)}${badgeHtml('Fat',t.f,state.tF,statF)}${badgeHtml('Carb',t.c,state.tC,statC)}</div>` : '';
+    const dayWarnHtml = statuses.includes('bad') ? `<div class="warn soft" style="margin:0 0 0;">⚠ Calories or one or more macros landed well outside the ±${Math.round(PFC_TOL*200)}% range on this day — try "Reshuffle this day", or widen the menu pool (fewer exclusions) if it keeps happening.</div>` : '';
     const rotation = state.rotationLabels?.[idx];
     const rotationTag = rotation ? `<span style="font-size:11px;font-weight:400;opacity:.8;margin-left:8px;">Week ${rotation.week} · Day ${rotation.day}</span>` : '';
     return `
